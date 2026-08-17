@@ -3,5 +3,5 @@
   "name": "tencent-minute-mcp-test",
   "main": "src/server.ts",
   "compatibility_date": "2026-08-01",
-  "compatibility_flags": ["nodejs_compat", "text_decoder_cjk_decoder"]
+  "compatibility_flags": ["nodejs_compat"]
 }
