@@ -1,0 +1,28 @@
+TENCENT_MINUTE_TEST_0.2_RC2 pre-upload validation
+
+Completed locally:
+- TypeScript strict syntax/type pass using local dependency stubs: PASS
+- Offline logic selftest: 17 / 17 PASS
+
+Selftest coverage includes:
+- 09:30 auction seed in first 5m
+- normal 5m completion after bar-end grace
+- forming partial is not a true gap
+- window-edge partial is not a true gap
+- internal missing minute is a true gap
+- 11:30 morning close bucket
+- 13:01-13:05 first afternoon bucket
+- completed-only cross check
+- official 2026 regular trading weekday
+- official 2026 holiday fail-closed
+- weekend fail-closed
+- outside-2026 calendar unverified
+- session state on holiday
+- session state outside calendar coverage
+- volume diagnostic does not promote unit semantics
+- 15m oversized request is visibly capped
+- window edge cannot hide an internal true gap
+
+Not claimed locally:
+- Full npm dependency install/build in this container (package installation timed out).
+- Cloudflare production deployment. Final confirmation should use the user's GitHub -> Cloudflare deployment and live MCP call.

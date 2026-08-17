@@ -2,8 +2,8 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
-const VERSION = "TENCENT_MINUTE_TEST_0.2_RC1";
-const MCP_VERSION = "0.2.0";
+const VERSION = "TENCENT_MINUTE_TEST_0.2_RC2";
+const MCP_VERSION = "0.2.1";
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 const COMPLETION_GRACE_MS = 5_000;
 const ALLOWED_INTERVALS = [1, 5, 15] as const;
@@ -11,6 +11,8 @@ type Interval = (typeof ALLOWED_INTERVALS)[number];
 
 type BarState = "COMPLETED" | "FORMING" | "AUCTION_SEED" | "OUT_OF_SESSION";
 type SessionState =
+  | "NON_TRADING_DAY"
+  | "CALENDAR_UNVERIFIED"
   | "PRE_OPEN"
   | "OPENING_AUCTION"
   | "POST_AUCTION_PRE_CONTINUOUS"
@@ -132,8 +134,82 @@ function formatDateTime(date: string, totalMinutes: number): string {
   return `${date} ${pad2(h)}:${pad2(m)}`;
 }
 
+const OFFICIAL_2026_CLOSED_DATES = new Set<string>([
+  // 元旦
+  "2026-01-01", "2026-01-02", "2026-01-03",
+  // 春节
+  "2026-02-15", "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20", "2026-02-21", "2026-02-22", "2026-02-23",
+  // 清明节
+  "2026-04-04", "2026-04-05", "2026-04-06",
+  // 劳动节
+  "2026-05-01", "2026-05-02", "2026-05-03", "2026-05-04", "2026-05-05",
+  // 端午节
+  "2026-06-19", "2026-06-20", "2026-06-21",
+  // 中秋节
+  "2026-09-25", "2026-09-26", "2026-09-27",
+  // 国庆节
+  "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07"
+]);
+
+function tradingCalendarInfo(date: string) {
+  const m = date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) {
+    return {
+      coverage: "2026_SSE_SZSE_OFFICIAL",
+      status: "INVALID_DATE",
+      is_trading_day: null as boolean | null,
+      reason: "INVALID_DATE",
+      source: "SSE_SZSE_2026_OFFICIAL_CLOSURE_NOTICES"
+    };
+  }
+
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (year !== 2026) {
+    return {
+      coverage: "2026_SSE_SZSE_OFFICIAL",
+      status: "OUTSIDE_EMBEDDED_COVERAGE",
+      is_trading_day: null as boolean | null,
+      reason: "CALENDAR_UNVERIFIED_OUTSIDE_2026",
+      source: "SSE_SZSE_2026_OFFICIAL_CLOSURE_NOTICES"
+    };
+  }
+
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  if (weekday === 0 || weekday === 6) {
+    return {
+      coverage: "2026_SSE_SZSE_OFFICIAL",
+      status: "VERIFIED_2026",
+      is_trading_day: false,
+      reason: "WEEKEND",
+      source: "SSE_SZSE_2026_OFFICIAL_CLOSURE_NOTICES"
+    };
+  }
+  if (OFFICIAL_2026_CLOSED_DATES.has(date)) {
+    return {
+      coverage: "2026_SSE_SZSE_OFFICIAL",
+      status: "VERIFIED_2026",
+      is_trading_day: false,
+      reason: "OFFICIAL_EXCHANGE_HOLIDAY",
+      source: "SSE_SZSE_2026_OFFICIAL_CLOSURE_NOTICES"
+    };
+  }
+  return {
+    coverage: "2026_SSE_SZSE_OFFICIAL",
+    status: "VERIFIED_2026",
+    is_trading_day: true,
+    reason: "REGULAR_TRADING_WEEKDAY",
+    source: "SSE_SZSE_2026_OFFICIAL_CLOSURE_NOTICES"
+  };
+}
+
 function sessionStateAt(now = new Date()): SessionState {
   const bj = beijingNowParts(now);
+  const cal = tradingCalendarInfo(bj.date);
+  if (cal.is_trading_day === false) return "NON_TRADING_DAY";
+  if (cal.is_trading_day == null) return "CALENDAR_UNVERIFIED";
+
   const t = bj.hhmmss;
   if (t < 91500) return "PRE_OPEN";
   if (t < 92500) return "OPENING_AUCTION";
@@ -161,10 +237,16 @@ function sourceSession(pt: NonNullable<ReturnType<typeof parseMinuteTime>>) {
 
 function classifyRawMinute(pt: ReturnType<typeof parseMinuteTime>, now = new Date()): BarState {
   if (!pt) return "OUT_OF_SESSION";
+  const bj = beijingNowParts(now);
+
+  if (pt.date === bj.date) {
+    const cal = tradingCalendarInfo(pt.date);
+    if (cal.is_trading_day !== true) return "OUT_OF_SESSION";
+  }
+
   if (isAuctionSeedMinute(pt.totalMinutes)) return "AUCTION_SEED";
   if (!isRegularTradingMinute(pt.totalMinutes)) return "OUT_OF_SESSION";
 
-  const bj = beijingNowParts(now);
   if (pt.date < bj.date) return "COMPLETED";
   if (pt.date > bj.date) return "FORMING";
 
@@ -177,6 +259,8 @@ function isBucketEndComplete(label: string, now = new Date()) {
   const bj = beijingNowParts(now);
   if (pt.date < bj.date) return true;
   if (pt.date > bj.date) return false;
+  const cal = tradingCalendarInfo(pt.date);
+  if (cal.is_trading_day !== true) return false;
   return now.getTime() >= pt.epochMs + COMPLETION_GRACE_MS;
 }
 
@@ -447,7 +531,7 @@ function aggregate1mBars(raw1m: RawMinuteBar[], interval: Exclude<Interval, 1>, 
     const bucketCompleteByClock = isBucketEndComplete(label, now);
     const sessionKey = sessionKeyForTime(label);
     const earliest = sessionKey ? earliestBySession.get(sessionKey) : undefined;
-    const missingBeforeWindow = Boolean(earliest && missing.some((t) => t < earliest));
+    const allMissingBeforeWindow = Boolean(earliest && missing.length > 0 && missing.every((t) => t < earliest));
 
     let bucketState: AggregatedBar["bucket_state"];
     let partialKind: PartialKind | null = null;
@@ -461,7 +545,7 @@ function aggregate1mBars(raw1m: RawMinuteBar[], interval: Exclude<Interval, 1>, 
       bucketState = "FORMING";
       partialKind = "FORMING_PARTIAL";
       formingPartials.push(`${label}: ${present.length}/${expected.length}`);
-    } else if (!allExpectedPresent && missingBeforeWindow) {
+    } else if (!allExpectedPresent && allMissingBeforeWindow) {
       bucketState = "WINDOW_EDGE_PARTIAL";
       partialKind = "WINDOW_EDGE_PARTIAL";
       windowEdgePartials.push(`${label}: ${present.length}/${expected.length}; missing=${missing.join(",")}`);
@@ -530,7 +614,7 @@ function compareCompletedBars(nativeBars: RawMinuteBar[], aggregated: Aggregated
         const diff = Math.abs((n[k] as number) - (a[k] as number));
         priceDiffs[k] = diff;
         if (diff > 0.005) priceOk = false;
-        if (diff !== 0) priceExact = false;
+        if (diff > 1e-12) priceExact = false;
       }
     }
 
@@ -541,7 +625,7 @@ function compareCompletedBars(nativeBars: RawMinuteBar[], aggregated: Aggregated
       volumeDiff = Math.abs(n.volume_raw - a.volume_raw);
       const rel = volumeDiff / Math.max(1, Math.abs(n.volume_raw));
       volumeOk = volumeDiff <= 2 || rel <= 0.0005;
-      volumeExact = volumeDiff === 0;
+      volumeExact = volumeDiff <= 1e-9;
     }
 
     const withinTolerance = priceOk && volumeOk;
@@ -605,15 +689,104 @@ async function fetchQuoteForDiagnostics(symbol: string) {
 }
 
 function commonMetadata(now = new Date()) {
+  const bj = beijingNowParts(now);
+  const cal = tradingCalendarInfo(bj.date);
   return {
     version: VERSION,
     session_state: sessionStateAt(now),
-    session_calendar_note: "SESSION_STATE_IS_CLOCK_BASED; EXCHANGE_HOLIDAY_CALENDAR_NOT_EMBEDDED",
+    trading_calendar: {
+      date: bj.date,
+      ...cal,
+      formal_gate: cal.is_trading_day === true ? "CALENDAR_PASS" : "CALENDAR_FAIL_CLOSED"
+    },
+    session_calendar_note: "2026_SSE_SZSE_OFFICIAL_HOLIDAYS_EMBEDDED; WEEKENDS_CLOSED; OUTSIDE_2026_CALENDAR_UNVERIFIED_FAIL_CLOSED",
     completion_model: "TENCENT_LABEL_IS_BAR_END; COMPLETED_AFTER_BAR_END_PLUS_5_SECONDS",
     completion_grace_ms: COMPLETION_GRACE_MS,
     safety_status: "TEST_ONLY",
     formal_v3_trigger: "NOT_APPROVED",
     formal_trigger_allowed: false
+  };
+}
+
+function requestWindowPlan(interval: Interval, requestedLimit: number) {
+  if (interval === 1) {
+    const effectiveLimit = Math.min(60, requestedLimit);
+    return {
+      policy: "AUTO_RECENT_WINDOW",
+      requested_limit: requestedLimit,
+      effective_limit: effectiveLimit,
+      reliable_max_completed_bars: 60,
+      requested_limit_supported: requestedLimit <= 60,
+      one_minute_count: Math.min(320, Math.max(80, effectiveLimit + 20)),
+      native_count: null,
+      note: "1m tool schema limits completed output to <=60 bars; extra raw rows are fetched for state/auction diagnostics"
+    };
+  }
+
+  const reliableMax = interval === 5 ? 60 : 20;
+  const effectiveLimit = Math.min(requestedLimit, reliableMax);
+  const oneMinuteCount = Math.min(320, Math.max(interval === 5 ? 140 : 240, interval * effectiveLimit + 20));
+  return {
+    policy: "AUTO_RECENT_WINDOW_WITH_CAPACITY_DIAGNOSTICS",
+    requested_limit: requestedLimit,
+    effective_limit: effectiveLimit,
+    reliable_max_completed_bars: reliableMax,
+    requested_limit_supported: requestedLimit <= reliableMax,
+    one_minute_count: oneMinuteCount,
+    native_count: Math.min(320, effectiveLimit + 10),
+    note: requestedLimit <= reliableMax
+      ? "Requested completed-bar window fits the Tencent ~320-row 1m cap with reserved edge/forming diagnostics"
+      : `Requested ${requestedLimit} bars exceeds conservative ${interval}m reliable window ${reliableMax}; output is capped visibly rather than silently under-covering`
+  };
+}
+
+function computeVolumeValidation(oneBars: RawMinuteBar[], quote: any, now = new Date()) {
+  const bj = beijingNowParts(now);
+  const currentDay = oneBars
+    .filter((b) => b.time.startsWith(`${bj.date} `) && b.bar_state !== "OUT_OF_SESSION")
+    .sort((a, b) => a.time.localeCompare(b.time));
+
+  const usable = currentDay.filter((b) => b.volume_raw != null);
+  const sumRaw = usable.length === currentDay.length && usable.length > 0
+    ? usable.reduce((acc, b) => acc + (b.volume_raw as number), 0)
+    : null;
+  const earliest = currentDay[0]?.time ?? null;
+  const latest = currentDay[currentDay.length - 1]?.time ?? null;
+  const startsAtAuctionSeed = Boolean(earliest?.endsWith("09:30"));
+  const quotePt = quote?.quote_time ? parseMinuteTime(quote.quote_time) : null;
+  const latestPt = latest ? parseMinuteTime(latest) : null;
+  const quoteSameDate = Boolean(quotePt && quotePt.date === bj.date);
+  const coversQuoteMinute = Boolean(quotePt && latestPt && latestPt.date === quotePt.date && latestPt.totalMinutes >= quotePt.totalMinutes);
+  const quoteVolume = typeof quote?.volume_lot === "number" ? quote.volume_lot : null;
+  const diff = sumRaw != null && quoteVolume != null ? Math.abs(sumRaw - quoteVolume) : null;
+  const rel = diff != null && quoteVolume != null ? diff / Math.max(1, Math.abs(quoteVolume)) : null;
+
+  let status = "INSUFFICIENT_COVERAGE";
+  if (sumRaw == null || quoteVolume == null || !quoteSameDate || !startsAtAuctionSeed || !coversQuoteMinute) {
+    status = "INSUFFICIENT_COVERAGE";
+  } else if ((diff as number) <= 2 || (rel as number) <= 0.001) {
+    status = "WITHIN_LIVE_TOLERANCE";
+  } else {
+    status = "MISMATCH_OR_SNAPSHOT_SKEW";
+  }
+
+  return {
+    status,
+    current_date: bj.date,
+    current_day_rows: currentDay.length,
+    earliest_current_day_bar: earliest,
+    latest_current_day_bar: latest,
+    starts_at_0930_auction_seed: startsAtAuctionSeed,
+    quote_time: quote?.quote_time ?? null,
+    quote_same_date: quoteSameDate,
+    covers_quote_minute: coversQuoteMinute,
+    sum_volume_raw_current_day: sumRaw,
+    quote_volume_lot: quoteVolume,
+    absolute_difference: diff,
+    relative_difference: rel,
+    unit_conclusion: "UNVERIFIED_TENCENT_RAW",
+    use_for_formal_gate: false,
+    note: "Diagnostic only. A live near-match supports same-scale consistency but does not prove the unit semantics; snapshot timing can create small differences."
   };
 }
 
@@ -627,10 +800,11 @@ function bseUnavailableStatus(symbol: string, quote: any, one: any, native?: any
 
 async function buildMinuteResponse(code: string, interval: Interval, limit: number) {
   const symbol = normalizeSymbol(code);
+  const windowPlan = requestWindowPlan(interval, limit);
   const quote = await fetchQuoteForDiagnostics(symbol);
 
   if (interval === 1) {
-    const raw = await fetchTencentMinuteRaw(symbol, 1, Math.min(320, limit + 8));
+    const raw = await fetchTencentMinuteRaw(symbol, 1, windowPlan.one_minute_count);
     const doneAt = new Date();
     const bseStatus = bseUnavailableStatus(symbol, quote, raw);
 
@@ -642,6 +816,7 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
         data_status: bseStatus ?? "DOWN",
         data_grade: "C",
         request_policy: "TENCENT_MKLINE_SERIAL_HOST_RETRY_NO_STALE_CACHE",
+        request_window: windowPlan,
         preferred_path: null,
         returned_completed_bars: 0,
         completed_bars: [],
@@ -664,7 +839,7 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
     }
 
     const bars = parseMinuteRows(raw.rows, raw.fetched_at);
-    const completed = bars.filter((b) => b.bar_state === "COMPLETED").slice(-limit);
+    const completed = bars.filter((b) => b.bar_state === "COMPLETED").slice(-windowPlan.effective_limit);
     const forming = bars.filter((b) => b.bar_state === "FORMING");
     const auctionSeeds = bars.filter((b) => b.bar_state === "AUCTION_SEED");
 
@@ -675,6 +850,7 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
       data_status: "OK",
       data_grade: "B",
       request_policy: "TENCENT_MKLINE_SERIAL_HOST_RETRY_NO_STALE_CACHE",
+      request_window: windowPlan,
       preferred_path: "TENCENT_NATIVE_1M",
       returned_completed_bars: completed.length,
       completed_bars: completed,
@@ -684,6 +860,7 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
       integrity: integrityCheck(bars),
       fetch_meta: raw.fetch_meta,
       quote_diagnostics: quote,
+      volume_validation: computeVolumeValidation(bars, quote, doneAt),
       fetched_at_beijing: beijingNowParts(doneAt).iso,
       timestamp_semantics: "BAR_END_SUPPORTED_BY_2026-08-12_LIVE_TESTS; 09:30_IS_AUCTION_SEED_NOT_REGULAR_1M",
       field_semantics: {
@@ -696,10 +873,9 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
     };
   }
 
-  const oneMinNeed = Math.min(320, Math.max(120, interval * (limit + 5) + 16));
-  const one = await fetchTencentMinuteRaw(symbol, 1, oneMinNeed);
+  const one = await fetchTencentMinuteRaw(symbol, 1, windowPlan.one_minute_count);
   if (one.ok) await sleep(220);
-  const native = await fetchTencentMinuteRaw(symbol, interval, Math.min(320, limit + 10));
+  const native = await fetchTencentMinuteRaw(symbol, interval, windowPlan.native_count ?? Math.min(320, windowPlan.effective_limit + 10));
   const doneAt = new Date();
   const bseStatus = bseUnavailableStatus(symbol, quote, one, native);
 
@@ -715,13 +891,13 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
   let nativeBars: RawMinuteBar[] = [];
   if (native.ok) nativeBars = parseMinuteRows(native.rows, native.fetched_at);
 
-  const aggCompleted = aggregation.bars.filter((b) => b.bucket_state === "COMPLETED").slice(-limit);
+  const aggCompleted = aggregation.bars.filter((b) => b.bucket_state === "COMPLETED").slice(-windowPlan.effective_limit);
   const aggForming = aggregation.bars.filter((b) => b.bucket_state === "FORMING");
-  const nativeCompleted = nativeBars.filter((b) => b.bar_state === "COMPLETED").slice(-limit);
+  const nativeCompleted = nativeBars.filter((b) => b.bar_state === "COMPLETED").slice(-windowPlan.effective_limit);
   const nativeForming = nativeBars.filter((b) => b.bar_state === "FORMING");
 
   const cross = one.ok && native.ok
-    ? compareCompletedBars(nativeBars, aggregation.bars, Math.min(12, limit))
+    ? compareCompletedBars(nativeBars, aggregation.bars, Math.min(12, windowPlan.effective_limit))
     : {
         comparison_scope: "COMPLETED_BARS_ONLY",
         status: "NOT_AVAILABLE",
@@ -783,6 +959,7 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
     data_grade: dataGrade,
     exact_5m_candidate_rule: interval === 5 ? "ONLY_GRADE_A_MAY_BECOME_FORMAL_AFTER_SEPARATE_V3_APPROVAL" : "NOT_APPLICABLE_OR_AUXILIARY",
     request_policy: "SEQUENTIAL_TENCENT_1M_PRIMARY_THEN_NATIVE_VERIFY_COMPLETED_ONLY",
+    request_window: windowPlan,
     preferred_path: preferredPath,
     returned_completed_bars: topCompleted.length,
     completed_bars: topCompleted,
@@ -816,6 +993,7 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
     },
     cross_path_check: cross,
     quote_diagnostics: quote,
+    volume_validation: computeVolumeValidation(oneBars, quote, doneAt),
     fetched_at_beijing: beijingNowParts(doneAt).iso,
     timestamp_semantics: "BAR_END_SUPPORTED_BY_2026-08-12_LIVE_TESTS; CROSS_CHECK_COMPLETED_BARS_ONLY",
     field_semantics: {
@@ -954,6 +1132,82 @@ function runLogicSelfTest() {
     observed: cross
   });
 
+  const calendarWeekday = tradingCalendarInfo("2026-08-17");
+  cases.push({
+    name: "TRADING_CALENDAR_REGULAR_WEEKDAY_PASS",
+    pass: calendarWeekday.is_trading_day === true,
+    observed: calendarWeekday
+  });
+
+  const calendarHoliday = tradingCalendarInfo("2026-10-01");
+  cases.push({
+    name: "TRADING_CALENDAR_OFFICIAL_HOLIDAY_FAIL_CLOSED",
+    pass: calendarHoliday.is_trading_day === false && calendarHoliday.reason === "OFFICIAL_EXCHANGE_HOLIDAY",
+    observed: calendarHoliday
+  });
+
+  const calendarWeekend = tradingCalendarInfo("2026-08-16");
+  cases.push({
+    name: "TRADING_CALENDAR_WEEKEND_FAIL_CLOSED",
+    pass: calendarWeekend.is_trading_day === false && calendarWeekend.reason === "WEEKEND",
+    observed: calendarWeekend
+  });
+
+  const outsideCalendar = tradingCalendarInfo("2027-01-04");
+  cases.push({
+    name: "TRADING_CALENDAR_OUTSIDE_COVERAGE_UNVERIFIED",
+    pass: outsideCalendar.is_trading_day == null && outsideCalendar.status === "OUTSIDE_EMBEDDED_COVERAGE",
+    observed: outsideCalendar
+  });
+
+  cases.push({
+    name: "SESSION_STATE_HOLIDAY_IS_NON_TRADING_DAY",
+    pass: sessionStateAt(bjDate("2026-10-01 10:00:00")) === "NON_TRADING_DAY",
+    observed: sessionStateAt(bjDate("2026-10-01 10:00:00"))
+  });
+
+  cases.push({
+    name: "SESSION_STATE_OUTSIDE_CALENDAR_IS_UNVERIFIED",
+    pass: sessionStateAt(bjDate("2027-01-04 10:00:00")) === "CALENDAR_UNVERIFIED",
+    observed: sessionStateAt(bjDate("2027-01-04 10:00:00"))
+  });
+
+  const volumeNow = bjDate("2026-08-12 09:32:00");
+  const volumeRows = [
+    syntheticRaw("2026-08-12 09:30", 10, 10, 10, 10, 100, volumeNow),
+    syntheticRaw("2026-08-12 09:31", 10, 10.1, 9.9, 10.05, 200, volumeNow)
+  ];
+  const volumeCheck = computeVolumeValidation(volumeRows, { quote_time: "20260812093130", volume_lot: 300 }, volumeNow);
+  cases.push({
+    name: "VOLUME_DIAGNOSTIC_NEAR_MATCH_DOES_NOT_PROMOTE_UNIT",
+    pass: volumeCheck.status === "WITHIN_LIVE_TOLERANCE" && volumeCheck.unit_conclusion === "UNVERIFIED_TENCENT_RAW" && volumeCheck.use_for_formal_gate === false,
+    observed: volumeCheck
+  });
+
+  const cappedWindow = requestWindowPlan(15, 60);
+  cases.push({
+    name: "FIFTEEN_MINUTE_OVERSIZED_LIMIT_IS_VISIBLY_CAPPED",
+    pass: cappedWindow.requested_limit_supported === false && cappedWindow.effective_limit === 20 && cappedWindow.one_minute_count === 320,
+    observed: cappedWindow
+  });
+
+  const mixedNow = bjDate("2026-08-12 10:11:00");
+  const mixedRows: RawMinuteBar[] = [
+    syntheticRaw("2026-08-12 10:03", 10, 10.2, 9.9, 10.1, 100, mixedNow),
+    syntheticRaw("2026-08-12 10:04", 10, 10.2, 9.9, 10.1, 100, mixedNow),
+    syntheticRaw("2026-08-12 10:05", 10, 10.2, 9.9, 10.1, 100, mixedNow),
+    syntheticRaw("2026-08-12 10:06", 10, 10.2, 9.9, 10.1, 100, mixedNow),
+    syntheticRaw("2026-08-12 10:07", 10, 10.2, 9.9, 10.1, 100, mixedNow),
+    syntheticRaw("2026-08-12 10:09", 10, 10.2, 9.9, 10.1, 100, mixedNow),
+    syntheticRaw("2026-08-12 10:10", 10, 10.2, 9.9, 10.1, 100, mixedNow)
+  ];
+  const mixedAgg = aggregate1mBars(mixedRows, 5, mixedNow);
+  cases.push({
+    name: "WINDOW_EDGE_DOES_NOT_HIDE_INTERNAL_TRUE_GAP",
+    pass: mixedAgg.true_bar_gaps.some((x) => x.startsWith("2026-08-12 10:10")),
+    observed: mixedAgg
+  });
+
   const failed = cases.filter((x) => !x.pass);
   return {
     version: VERSION,
@@ -969,10 +1223,10 @@ function runLogicSelfTest() {
 async function buildHealthResponse() {
   const symbol = "sz300059";
   const started = new Date();
-  const quote = await fetchQuoteForDiagnostics(symbol);
-  const one = await fetchTencentMinuteRaw(symbol, 1, 140);
+  const one = await fetchTencentMinuteRaw(symbol, 1, 280);
   if (one.ok) await sleep(220);
-  const native5 = await fetchTencentMinuteRaw(symbol, 5, 30);
+  const native5 = await fetchTencentMinuteRaw(symbol, 5, 50);
+  const quote = await fetchQuoteForDiagnostics(symbol);
   const ended = new Date();
 
   const oneBars = one.ok ? parseMinuteRows(one.rows, one.fetched_at) : [];
@@ -1019,10 +1273,12 @@ async function buildHealthResponse() {
       true_gap_count: agg.true_bar_gaps.length,
       window_edge_partial_count: agg.window_edge_partials.length,
       forming_partial_count: agg.forming_partials.length,
-      cross_completed_status: cross.status
+      cross_completed_status: cross.status,
+      calendar_gate: tradingCalendarInfo(beijingNowParts(ended).date).is_trading_day === true ? "PASS" : "FAIL_CLOSED"
     },
     checks: {
       quote,
+      volume_validation: computeVolumeValidation(oneBars, quote, ended),
       minute_1m: {
         ok: m1Ok,
         integrity: one.ok ? integrityCheck(oneBars) : { ok: false, issues: ["NO_1M_DATA"] },
@@ -1053,15 +1309,34 @@ function createServer() {
     "get_tencent_minute_kline",
     {
       description:
-        "腾讯分钟K RC1测试。仅开放1/5/15分钟；5/15分钟用腾讯1分钟本地聚合，并只对双方已完成K与腾讯原生周期交叉验证。含09:30集合竞价seed、午休/下午session、窗口边缘/真缺口分类和fail-closed。仅测试，禁止直接作为BSI-SWING_V3正式触发。",
+        "腾讯分钟K RC2测试。正式候选只支持1/5/15分钟；为兼容旧ChatGPT工具快照仍接受30/60输入，但会结构化返回UNSUPPORTED_INTERVAL，不会静默生成不完整数据。5/15分钟用腾讯1分钟本地聚合，并只对双方已完成K与腾讯原生周期交叉验证。含09:30集合竞价seed、午休/下午session、窗口边缘/真缺口分类和fail-closed。仅测试，禁止直接作为BSI-SWING_V3正式触发。",
       inputSchema: {
         code: z.string().describe("证券代码。普通股票可写300059；指数/易歧义代码请显式写交易所前缀，例如sh000300；ETF建议写sh510300/sz159919"),
-        interval: z.union([z.literal(1), z.literal(5), z.literal(15)]).default(5),
+        interval: z.union([z.literal(1), z.literal(5), z.literal(15), z.literal(30), z.literal(60)]).default(5),
         limit: z.number().int().min(5).max(60).default(20)
       }
     },
     async ({ code, interval, limit }) => {
       try {
+        if (interval === 30 || interval === 60) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                version: VERSION,
+                data_status: "UNSUPPORTED_INTERVAL",
+                data_grade: "C",
+                requested_interval: `${interval}m`,
+                supported_intervals: ["1m", "5m", "15m"],
+                compatibility_note: "30m/60m inputs are accepted only to remain compatible with older ChatGPT tool snapshots; RC2 does not treat them as validated formal candidates because the Tencent 1m request window is capped.",
+                safety_status: "TEST_ONLY",
+                formal_v3_trigger: "NOT_APPROVED",
+                formal_trigger_allowed: false,
+                error: "30m/60m are intentionally disabled in RC2"
+              }, null, 2)
+            }]
+          };
+        }
         const data = await buildMinuteResponse(code, interval as Interval, limit);
         return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       } catch (e) {
@@ -1087,7 +1362,7 @@ function createServer() {
     "tencent_minute_health",
     {
       description:
-        "腾讯分钟K RC1健康检查。复用一次quote、一次1m和一次原生5m请求，输出session、latest completed、forming、真缺口、窗口边缘和仅completed跨路径校验。",
+        "腾讯分钟K RC2健康检查。复用一次quote、一次1m和一次原生5m请求，输出session、latest completed、forming、真缺口、窗口边缘和仅completed跨路径校验。",
       inputSchema: {}
     },
     async () => {
