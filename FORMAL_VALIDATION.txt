@@ -1,0 +1,29 @@
+TENCENT_MINUTE_V1.0 local formal-package validation
+
+Basis:
+- Promoted from the deployed V1.0 Candidate after its acceptance regression passed.
+- Core market-data fetch/parsing/aggregation logic intentionally preserved.
+
+Static source check:
+- TypeScript source parsed/type-checked locally with runtime/module stubs.
+- Result: PASS, 0 errors in source-level check.
+
+Offline logic self-test:
+- version=TENCENT_MINUTE_V1.0
+- total=31
+- passed=31
+- failed=0
+- result=PASS
+
+New formal-release assertions passed:
+- Normalized volume integerization removes floating tails.
+- Lunch frozen 11:30 quote audit returns SESSION_FROZEN_MATCH.
+- Stable Grade-A 5m hard gate can return formal_trigger_allowed=true.
+- SYNC_SETTLING blocks formal_trigger_allowed.
+
+Not performed locally:
+- Dependency-resolved Cloudflare production deployment/build.
+- Calls against the newly deployed formal Worker.
+
+Required next step:
+Deploy this package, then run POST_DEPLOY_SMOKE_TESTS.md before changing 学委/BSI-SWING_V3 integration.

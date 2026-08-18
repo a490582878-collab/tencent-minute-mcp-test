@@ -2,8 +2,12 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
-const VERSION = "TENCENT_MINUTE_V1.0_CANDIDATE";
+const VERSION = "TENCENT_MINUTE_V1.0";
 const MCP_VERSION = "1.0.0";
+const SERVER_FORMAL_RELEASE_ENABLED = true;
+const SAFETY_STATUS = "FORMAL_RELEASE";
+const RELEASE_STATUS = "V1_0_RELEASED";
+const FORMAL_V3_TRIGGER = "APPROVED_WITH_HARD_GATE";
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 const BAR_CLOSE_GRACE_MS = 5_000;
 const CROSS_SYNC_GRACE_MS = 30_000;
@@ -167,7 +171,7 @@ function volumeProfileForSymbol(symbol: string): VolumeProfile {
 
 function normalizedVolume(raw: number | null | undefined, profile: VolumeProfile): number | null {
   if (raw == null || !profile.absolute_normalization_usable || profile.multiplier_to_base_units == null) return null;
-  return raw * profile.multiplier_to_base_units;
+  return Math.round(raw * profile.multiplier_to_base_units);
 }
 
 function withNormalizedVolume<T extends { volume_raw: number | null }>(bar: T, profile: VolumeProfile) {
@@ -867,9 +871,9 @@ function commonMetadata(now = new Date()) {
     completion_grace_ms: BAR_CLOSE_GRACE_MS,
     bar_close_grace_ms: BAR_CLOSE_GRACE_MS,
     cross_sync_grace_ms: CROSS_SYNC_GRACE_MS,
-    safety_status: "RELEASE_CANDIDATE_TEST_ONLY",
-    release_status: "V1_0_CANDIDATE_PENDING_ACCEPTANCE",
-    formal_v3_trigger: "NOT_APPROVED",
+    safety_status: SAFETY_STATUS,
+    release_status: RELEASE_STATUS,
+    formal_v3_trigger: FORMAL_V3_TRIGGER,
     formal_trigger_allowed: false
   };
 }
@@ -909,6 +913,7 @@ function requestWindowPlan(interval: Interval, requestedLimit: number) {
 function computeVolumeValidation(symbol: string, oneBars: RawMinuteBar[], quote: any, now = new Date()) {
   const profile = volumeProfileForSymbol(symbol);
   const bj = beijingNowParts(now);
+  const session = sessionStateAt(now);
   const currentDay = oneBars
     .filter((b) => b.time.startsWith(`${bj.date} `) && b.bar_state !== "OUT_OF_SESSION")
     .sort((a, b) => a.time.localeCompare(b.time));
@@ -924,22 +929,36 @@ function computeVolumeValidation(symbol: string, oneBars: RawMinuteBar[], quote:
   const latestPt = latest ? parseMinuteTime(latest) : null;
   const quoteSameDate = Boolean(quotePt && quotePt.date === bj.date);
   const coversQuoteMinute = Boolean(quotePt && latestPt && latestPt.date === quotePt.date && latestPt.totalMinutes >= quotePt.totalMinutes);
+  const lunchFrozenCoverage = Boolean(
+    session === "LUNCH_BREAK" && quotePt && latestPt && quoteSameDate &&
+    latestPt.totalMinutes === 11 * 60 + 30 &&
+    quotePt.totalMinutes >= 11 * 60 + 30 && quotePt.totalMinutes < 13 * 60
+  );
+  const postCloseFrozenCoverage = Boolean(
+    session === "POST_CLOSE" && quotePt && latestPt && quoteSameDate &&
+    latestPt.totalMinutes === 15 * 60 && quotePt.totalMinutes >= 15 * 60
+  );
+  const sessionFrozenCoverage = lunchFrozenCoverage || postCloseFrozenCoverage;
+  const coverageSatisfied = coversQuoteMinute || sessionFrozenCoverage;
   const quoteVolumeRaw = typeof quote?.volume_raw_quote === "number" ? quote.volume_raw_quote : null;
   const diff = sumRaw != null && quoteVolumeRaw != null ? Math.abs(sumRaw - quoteVolumeRaw) : null;
   const rel = diff != null && quoteVolumeRaw != null ? diff / Math.max(1, Math.abs(quoteVolumeRaw)) : null;
 
   let status = "INSUFFICIENT_COVERAGE";
-  if (sumRaw == null || quoteVolumeRaw == null || !quoteSameDate || !startsAtAuctionSeed || !coversQuoteMinute) {
+  if (sumRaw == null || quoteVolumeRaw == null || !quoteSameDate || !startsAtAuctionSeed || !coverageSatisfied) {
     status = "INSUFFICIENT_COVERAGE";
   } else if ((diff as number) <= 2 || (rel as number) <= 0.001) {
-    status = "WITHIN_LIVE_TOLERANCE";
+    status = sessionFrozenCoverage ? "SESSION_FROZEN_MATCH" : "WITHIN_LIVE_TOLERANCE";
   } else {
     status = "MISMATCH_OR_SNAPSHOT_SKEW";
   }
 
+  const scaleSupported = status === "WITHIN_LIVE_TOLERANCE" || status === "SESSION_FROZEN_MATCH";
+
   return {
     status,
     current_date: bj.date,
+    session_state: session,
     current_day_rows: currentDay.length,
     earliest_current_day_bar: earliest,
     latest_current_day_bar: latest,
@@ -947,18 +966,20 @@ function computeVolumeValidation(symbol: string, oneBars: RawMinuteBar[], quote:
     quote_time: quote?.quote_time ?? null,
     quote_same_date: quoteSameDate,
     covers_quote_minute: coversQuoteMinute,
+    session_frozen_coverage: sessionFrozenCoverage,
+    session_frozen_reason: lunchFrozenCoverage ? "LUNCH_BREAK_LAST_VALID_MINUTE_11_30" : postCloseFrozenCoverage ? "POST_CLOSE_LAST_VALID_MINUTE_15_00" : null,
     sum_volume_raw_current_day: sumRaw,
     quote_volume_raw_current_day: quoteVolumeRaw,
     absolute_difference: diff,
     relative_difference: rel,
-    raw_scale_consistency: status === "WITHIN_LIVE_TOLERANCE" ? "SUPPORTED" : status === "INSUFFICIENT_COVERAGE" ? "NOT_TESTED" : "MISMATCH_OR_TIMING_SKEW",
+    raw_scale_consistency: scaleSupported ? "SUPPORTED" : status === "INSUFFICIENT_COVERAGE" ? "NOT_TESTED" : "MISMATCH_OR_TIMING_SKEW",
     volume_profile: profile,
     normalized_sum_current_day: normalizedVolume(sumRaw, profile),
     normalized_quote_volume: normalizedVolume(quoteVolumeRaw, profile),
     use_absolute_normalized_volume: profile.absolute_normalization_usable,
     use_relative_volume_ratios: profile.relative_volume_usable,
     use_for_formal_gate: false,
-    note: "Raw same-symbol volume is suitable for relative-volume ratios when the data path is healthy. Absolute normalization is allowed only for empirically validated symbol families; this is not official Tencent field documentation."
+    note: "Raw same-symbol volume is suitable for relative-volume ratios when the data path is healthy. Lunch/post-close frozen sessions are recognized as complete snapshots. Absolute normalization is allowed only for empirically validated symbol families; this is not official Tencent field documentation."
   };
 }
 
@@ -970,8 +991,9 @@ function buildV3CandidateGate(args: {
   trueGapCount: number;
   completedBars: Array<{ time: string }>;
   now: Date;
+  hasSettlingBar?: boolean;
 }) {
-  const { symbol, interval, dataGrade, crossStatus, trueGapCount, completedBars, now } = args;
+  const { symbol, interval, dataGrade, crossStatus, trueGapCount, completedBars, now, hasSettlingBar = false } = args;
   const reasons: string[] = [];
   const cal = tradingCalendarInfo(beijingNowParts(now).date);
   const latestVerified = completedBars.length ? completedBars[completedBars.length - 1].time : null;
@@ -982,6 +1004,7 @@ function buildV3CandidateGate(args: {
   if (dataGrade !== "A") reasons.push(`DATA_GRADE_${dataGrade}`);
   if (crossStatus !== "PASS") reasons.push(`CROSS_${crossStatus}`);
   if (trueGapCount > 0) reasons.push("TRUE_BAR_GAP_PRESENT");
+  if (hasSettlingBar) reasons.push("LATEST_BAR_SYNC_SETTLING");
   if (!latestVerified) reasons.push("NO_VERIFIED_COMPLETED_BAR");
 
   const dataGatePass = reasons.length === 0;
@@ -996,14 +1019,15 @@ function buildV3CandidateGate(args: {
       "completed-bar cross_path_check=PASS",
       "true_bar_gap_count=0",
       "non-BSE validated path",
+      "no sync-settling bar pending verification",
       "verified completed bar exists"
     ],
     reasons,
-    server_formal_release_enabled: false,
-    formal_trigger_allowed: false,
+    server_formal_release_enabled: SERVER_FORMAL_RELEASE_ENABLED,
+    formal_trigger_allowed: SERVER_FORMAL_RELEASE_ENABLED && dataGatePass,
     note: dataGatePass
-      ? "V1.0 candidate data gate passes for the latest verified completed 5m bar, but server-level formal release remains disabled until acceptance regression passes."
-      : "Fail-closed: the candidate does not satisfy the exact 5m data gate."
+      ? "V1.0 formal hard gate passes for the latest verified completed 5m bar."
+      : "Fail-closed: the response does not satisfy the formal exact 5m hard gate."
   };
 }
 
@@ -1070,6 +1094,7 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
       ...commonMetadata(doneAt),
       symbol,
       interval: "1m",
+      exact_5m_trigger_eligible: false,
       data_status: "OK",
       data_grade: "B",
       request_policy: "TENCENT_MKLINE_SERIAL_HOST_RETRY_NO_STALE_CACHE",
@@ -1192,7 +1217,8 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
     crossStatus: cross.status,
     trueGapCount: aggregation.true_bar_gaps.length,
     completedBars: topCompleted,
-    now: doneAt
+    now: doneAt,
+    hasSettlingBar: aggSettling.length > 0 || nativeSettling.length > 0
   });
 
   return {
@@ -1201,7 +1227,7 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
     interval: `${interval}m`,
     data_status: dataStatus,
     data_grade: dataGrade,
-    exact_5m_candidate_rule: interval === 5 ? "V1_0_DATA_GATE_REQUIRES_GRADE_A_CROSS_PASS_NO_TRUE_GAP; SERVER_FORMAL_RELEASE_STAYS_DISABLED_UNTIL_ACCEPTANCE" : "NOT_APPLICABLE_OR_AUXILIARY",
+    exact_5m_candidate_rule: interval === 5 ? "V1_0_FORMAL_HARD_GATE_REQUIRES_GRADE_A_CROSS_PASS_NO_TRUE_GAP_CALENDAR_PASS_NO_SYNC_SETTLING" : "NOT_APPLICABLE_OR_AUXILIARY",
     request_policy: "SEQUENTIAL_TENCENT_1M_PRIMARY_THEN_NATIVE_VERIFY_COMPLETED_ONLY",
     request_window: windowPlan,
     preferred_path: preferredPath,
@@ -1213,12 +1239,12 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
     formal_candidate_status: interval === 5
       ? (topSettling
           ? "WAIT_SYNC_SETTLING"
-          : topForming
-            ? "WAIT_BAR_CLOSE"
-            : dataGrade === "A"
-              ? "V1_0_DATA_GATE_PASS_SERVER_FORMAL_RELEASE_DISABLED"
-              : "NOT_ELIGIBLE")
+          : v3CandidateGate.formal_trigger_allowed
+            ? "FORMAL_TRIGGER_ELIGIBLE"
+            : "NOT_ELIGIBLE")
       : "NOT_APPLICABLE_OR_AUXILIARY",
+    exact_5m_trigger_eligible: interval === 5 ? v3CandidateGate.formal_trigger_allowed : false,
+    formal_trigger_allowed: interval === 5 ? v3CandidateGate.formal_trigger_allowed : false,
     v3_candidate_gate: v3CandidateGate,
     aggregation_diagnostics: {
       forming_partials: aggregation.forming_partials,
@@ -1554,6 +1580,24 @@ function runLogicSelfTest() {
     observed: indexProfile
   });
 
+  cases.push({
+    name: "NORMALIZED_VOLUME_IS_INTEGERIZED_WITHOUT_FLOATING_TAIL",
+    pass: normalizedVolume(131796.02, mainProfile) === 13179602 && normalizedVolume(53658.200000000004, mainProfile) === 5365820,
+    observed: { a: normalizedVolume(131796.02, mainProfile), b: normalizedVolume(53658.200000000004, mainProfile) }
+  });
+
+  const lunchAuditNow = bjDate("2026-08-12 11:36:00");
+  const lunchAuditRows = [
+    syntheticRaw("2026-08-12 09:30", 10, 10, 10, 10, 100, lunchAuditNow),
+    syntheticRaw("2026-08-12 11:30", 10, 10, 10, 10, 200, lunchAuditNow)
+  ];
+  const lunchAudit = computeVolumeValidation("sz300059", lunchAuditRows, { quote_time: "20260812113600", volume_raw_quote: 300 }, lunchAuditNow);
+  cases.push({
+    name: "LUNCH_BREAK_VOLUME_AUDIT_RECOGNIZES_FROZEN_1130_SNAPSHOT",
+    pass: lunchAudit.status === "SESSION_FROZEN_MATCH" && lunchAudit.session_frozen_coverage === true && lunchAudit.raw_scale_consistency === "SUPPORTED",
+    observed: lunchAudit
+  });
+
   const gateProfileNow = bjDate("2026-08-12 10:20:31");
   const gate = buildV3CandidateGate({
     symbol: "sz300059",
@@ -1565,9 +1609,25 @@ function runLogicSelfTest() {
     now: gateProfileNow
   });
   cases.push({
-    name: "V1_DATA_GATE_CAN_PASS_WHILE_SERVER_FORMAL_RELEASE_STAYS_DISABLED",
-    pass: gate.data_gate_pass === true && gate.eligible_bar_time === "2026-08-12 10:20" && gate.formal_trigger_allowed === false && gate.server_formal_release_enabled === false,
+    name: "V1_FORMAL_HARD_GATE_ALLOWS_STABLE_GRADE_A_5M",
+    pass: gate.data_gate_pass === true && gate.eligible_bar_time === "2026-08-12 10:20" && gate.formal_trigger_allowed === true && gate.server_formal_release_enabled === true,
     observed: gate
+  });
+
+  const settlingGate = buildV3CandidateGate({
+    symbol: "sz300059",
+    interval: 5,
+    dataGrade: "A",
+    crossStatus: "PASS",
+    trueGapCount: 0,
+    completedBars: [{ time: "2026-08-12 10:15" }],
+    now: bjDate("2026-08-12 10:20:12"),
+    hasSettlingBar: true
+  });
+  cases.push({
+    name: "SYNC_SETTLING_BLOCKS_FORMAL_TRIGGER",
+    pass: settlingGate.data_gate_pass === false && settlingGate.formal_trigger_allowed === false && settlingGate.reasons.includes("LATEST_BAR_SYNC_SETTLING"),
+    observed: settlingGate
   });
 
   const cappedWindow = requestWindowPlan(15, 60);
@@ -1601,9 +1661,9 @@ function runLogicSelfTest() {
     mode: "OFFLINE_LOGIC_SELFTEST_NO_LIVE_MARKET_REQUIRED",
     cases,
     summary: { total: cases.length, passed: cases.length - failed.length, failed: failed.length },
-    safety_status: "RELEASE_CANDIDATE_TEST_ONLY",
-    release_status: "V1_0_CANDIDATE_PENDING_ACCEPTANCE",
-    formal_v3_trigger: "NOT_APPROVED"
+    safety_status: SAFETY_STATUS,
+    release_status: RELEASE_STATUS,
+    formal_v3_trigger: FORMAL_V3_TRIGGER
   };
 }
 
@@ -1647,7 +1707,8 @@ async function buildHealthResponse() {
     crossStatus: cross.status,
     trueGapCount: agg.true_bar_gaps.length,
     completedBars: m5Completed,
-    now: ended
+    now: ended,
+    hasSettlingBar: m5Settling.length > 0
   });
 
   return {
@@ -1658,10 +1719,13 @@ async function buildHealthResponse() {
     readiness: {
       quote: quote.ok ? "READY_FOR_TEST" : "DOWN",
       minute_1m: m1Ok ? "READY_FOR_TEST" : "DOWN",
-      minute_5m: m5A ? (m5Settling.length ? "GRADE_A_BASE_READY_LATEST_BAR_SYNC_SETTLING" : "GRADE_A_V1_CANDIDATE_READY") : "NOT_GRADE_A",
-      formal_v3_trigger: "NOT_APPROVED",
-      release_status: "V1_0_CANDIDATE_PENDING_ACCEPTANCE"
+      minute_5m: m5A ? (m5Settling.length ? "GRADE_A_READY_LATEST_BAR_SYNC_SETTLING" : "GRADE_A_FORMAL_READY") : "NOT_GRADE_A",
+      formal_v3_trigger: FORMAL_V3_TRIGGER,
+      release_status: RELEASE_STATUS,
+      formal_trigger_allowed: healthV3Gate.formal_trigger_allowed
     },
+    formal_trigger_allowed: healthV3Gate.formal_trigger_allowed,
+    exact_5m_trigger_eligible: healthV3Gate.formal_trigger_allowed,
     v3_candidate_gate: healthV3Gate,
     state: {
       session_state: sessionStateAt(ended),
@@ -1710,7 +1774,7 @@ async function buildHealthResponse() {
 
 function createServer() {
   const server = new McpServer({
-    name: "Tencent Minute Kline V1 Candidate",
+    name: "Tencent Minute Kline V1",
     version: MCP_VERSION
   });
 
@@ -1718,7 +1782,7 @@ function createServer() {
     "get_tencent_minute_kline",
     {
       description:
-        "腾讯分钟K V1.0 Candidate。正式验证周期为1/5/15分钟；30/60仅为旧工具快照兼容输入并结构化拒绝。5/15分钟采用腾讯1分钟聚合 + 腾讯原生周期的已完成K交叉验证；包含09:30集合竞价seed、午休/下午session、30秒路径同步settling、真缺口fail-closed、按证券家族的成交量归一化和BSI-SWING_V3 EXACT_5M候选数据门。当前仍为发布候选，formal_trigger_allowed=false，验收通过后再升正式。",
+        "腾讯分钟K正式V1.0。验证周期为1/5/15分钟；30/60仅为旧工具快照兼容输入并结构化拒绝。5/15分钟采用腾讯1分钟聚合 + 腾讯原生周期的已完成K交叉验证；包含09:30集合竞价seed、午休/下午session、30秒路径同步settling、真缺口fail-closed、按证券家族的成交量归一化和BSI-SWING_V3 EXACT_5M正式硬门。只有5m Grade A + completed cross PASS + 无真缺口 + 交易日历PASS + 无sync settling时 formal_trigger_allowed=true。",
       inputSchema: {
         code: z.string().describe("证券代码。普通股票可写300059；指数/易歧义代码请显式写交易所前缀，例如sh000300；ETF建议写sh510300/sz159919"),
         interval: z.union([z.literal(1), z.literal(5), z.literal(15), z.literal(30), z.literal(60)]).default(5),
@@ -1737,12 +1801,13 @@ function createServer() {
                 data_grade: "C",
                 requested_interval: `${interval}m`,
                 supported_intervals: ["1m", "5m", "15m"],
-                compatibility_note: "30m/60m inputs are accepted only to remain compatible with older ChatGPT tool snapshots; V1.0 Candidate does not treat them as validated formal candidates because the Tencent 1m request window is capped.",
-                safety_status: "RELEASE_CANDIDATE_TEST_ONLY",
-                release_status: "V1_0_CANDIDATE_PENDING_ACCEPTANCE",
-                formal_v3_trigger: "NOT_APPROVED",
+                compatibility_note: "30m/60m inputs are accepted only to remain compatible with older ChatGPT tool snapshots; formal V1.0 does not treat them as validated intervals because the Tencent 1m request window is capped.",
+                safety_status: SAFETY_STATUS,
+                release_status: RELEASE_STATUS,
+                formal_v3_trigger: FORMAL_V3_TRIGGER,
+                exact_5m_trigger_eligible: false,
                 formal_trigger_allowed: false,
-                error: "30m/60m are intentionally disabled in V1.0 Candidate"
+                error: "30m/60m are intentionally disabled in formal V1.0"
               }, null, 2)
             }]
           };
@@ -1757,9 +1822,10 @@ function createServer() {
               version: VERSION,
               data_status: "DOWN",
               data_grade: "C",
-              safety_status: "RELEASE_CANDIDATE_TEST_ONLY",
-              release_status: "V1_0_CANDIDATE_PENDING_ACCEPTANCE",
-              formal_v3_trigger: "NOT_APPROVED",
+              safety_status: SAFETY_STATUS,
+              release_status: RELEASE_STATUS,
+              formal_v3_trigger: FORMAL_V3_TRIGGER,
+              exact_5m_trigger_eligible: false,
               formal_trigger_allowed: false,
               error: String(e)
             }, null, 2)
@@ -1773,7 +1839,7 @@ function createServer() {
     "tencent_minute_health",
     {
       description:
-        "腾讯分钟K V1.0 Candidate健康检查。复用一次quote、一次1m和一次原生5m请求，输出session、latest completed、forming/settling、真缺口、成交量profile、候选V3数据门和仅completed跨路径校验。",
+        "腾讯分钟K正式V1.0健康检查。复用一次quote、一次1m和一次原生5m请求，输出session、latest completed、forming/settling、真缺口、成交量profile、正式V3硬门和仅completed跨路径校验。",
       inputSchema: {}
     },
     async () => {
@@ -1786,7 +1852,7 @@ function createServer() {
     "tencent_minute_logic_selftest",
     {
       description:
-        "V1.0 Candidate离线逻辑自测，不依赖交易日或实时行情。验证09:30集合竞价seed、5秒bar-close、30秒cross-sync settling、forming/window-edge/真缺口、午休、下午重开、成交量家族归一化和V3候选数据门。",
+        "正式V1.0离线逻辑自测，不依赖交易日或实时行情。验证09:30集合竞价seed、5秒bar-close、30秒cross-sync settling、forming/window-edge/真缺口、午休、下午重开、成交量整数归一化、午休volume audit和V3正式硬门。",
       inputSchema: {}
     },
     async () => {

@@ -1,0 +1,29 @@
+TENCENT_MINUTE_V1.0 部署说明
+
+最快操作：
+1. 备份当前 V1.0 Candidate 的 GitHub 提交/分支。
+2. 用本 ZIP 内容覆盖现有仓库，至少确认以下文件已替换：
+   - src/server.ts
+   - package.json
+   - tsconfig.json
+   - wrangler.jsonc
+3. Commit + Push。
+4. 等 Cloudflare 部署变绿。
+5. 回到 ChatGPT 告诉我："正式V1.0已部署，直接做上线回归"。
+
+保持不变：
+- Worker name: tencent-minute-mcp-test
+- get_tencent_minute_kline
+- tencent_minute_health
+- tencent_minute_logic_selftest
+
+部署后应看到：
+- version=TENCENT_MINUTE_V1.0
+- safety_status=FORMAL_RELEASE
+- release_status=V1_0_RELEASED
+- formal_v3_trigger=APPROVED_WITH_HARD_GATE
+
+注意：
+- 正式版允许健康的 Grade-A 5m 返回 formal_trigger_allowed=true。
+- 在完成部署后冒烟回归前，暂时不要把学委/BSI-SWING_V3 改为调用该正式触发门。
+- 冒烟回归 PASS 后即可进行模型集成，无需再做全天边界测试。
