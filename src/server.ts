@@ -2,10 +2,11 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
-const VERSION = "TENCENT_MINUTE_TEST_0.2_RC2";
-const MCP_VERSION = "0.2.1";
+const VERSION = "TENCENT_MINUTE_TEST_0.2_RC3";
+const MCP_VERSION = "0.2.2";
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
-const COMPLETION_GRACE_MS = 5_000;
+const BAR_CLOSE_GRACE_MS = 5_000;
+const CROSS_SYNC_GRACE_MS = 30_000;
 const ALLOWED_INTERVALS = [1, 5, 15] as const;
 type Interval = (typeof ALLOWED_INTERVALS)[number];
 
@@ -21,7 +22,12 @@ type SessionState =
   | "PM_SESSION"
   | "POST_CLOSE";
 
-type PartialKind = "FORMING_PARTIAL" | "WINDOW_EDGE_PARTIAL" | "TRUE_BAR_GAP";
+type PartialKind =
+  | "FORMING_PARTIAL"
+  | "FULL_ROWS_SETTLING"
+  | "CLOSED_SETTLING_PARTIAL"
+  | "WINDOW_EDGE_PARTIAL"
+  | "TRUE_BAR_GAP";
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
@@ -250,18 +256,27 @@ function classifyRawMinute(pt: ReturnType<typeof parseMinuteTime>, now = new Dat
   if (pt.date < bj.date) return "COMPLETED";
   if (pt.date > bj.date) return "FORMING";
 
-  return now.getTime() >= pt.epochMs + COMPLETION_GRACE_MS ? "COMPLETED" : "FORMING";
+  return now.getTime() >= pt.epochMs + BAR_CLOSE_GRACE_MS ? "COMPLETED" : "FORMING";
 }
 
-function isBucketEndComplete(label: string, now = new Date()) {
+type BucketTimingPhase = "FORMING" | "CLOSED_SETTLING" | "VERIFICATION_ELIGIBLE";
+
+function bucketTimingPhase(label: string, now = new Date()): BucketTimingPhase {
   const pt = parseMinuteTime(label);
-  if (!pt) return false;
+  if (!pt) return "FORMING";
   const bj = beijingNowParts(now);
-  if (pt.date < bj.date) return true;
-  if (pt.date > bj.date) return false;
+  if (pt.date < bj.date) return "VERIFICATION_ELIGIBLE";
+  if (pt.date > bj.date) return "FORMING";
   const cal = tradingCalendarInfo(pt.date);
-  if (cal.is_trading_day !== true) return false;
-  return now.getTime() >= pt.epochMs + COMPLETION_GRACE_MS;
+  if (cal.is_trading_day !== true) return "FORMING";
+  const ageMs = now.getTime() - pt.epochMs;
+  if (ageMs < BAR_CLOSE_GRACE_MS) return "FORMING";
+  if (ageMs < CROSS_SYNC_GRACE_MS) return "CLOSED_SETTLING";
+  return "VERIFICATION_ELIGIBLE";
+}
+
+function isCrossVerificationEligible(label: string, now = new Date()) {
+  return bucketTimingPhase(label, now) === "VERIFICATION_ELIGIBLE";
 }
 
 type RawMinuteBar = {
@@ -486,7 +501,7 @@ type AggregatedBar = {
   expected_rows: number;
   source_times: string[];
   missing_source_times: string[];
-  bucket_state: "COMPLETED" | "FORMING" | "WINDOW_EDGE_PARTIAL" | "TRUE_BAR_GAP";
+  bucket_state: "COMPLETED" | "FORMING" | "CLOSED_SETTLING" | "WINDOW_EDGE_PARTIAL" | "TRUE_BAR_GAP";
   partial_kind: PartialKind | null;
   is_complete: boolean;
 };
@@ -494,6 +509,9 @@ type AggregatedBar = {
 type AggregationResult = {
   bars: AggregatedBar[];
   forming_partials: string[];
+  full_rows_settling: string[];
+  closed_settling: string[];
+  closed_settling_partials: string[];
   window_edge_partials: string[];
   true_bar_gaps: string[];
 };
@@ -519,6 +537,9 @@ function aggregate1mBars(raw1m: RawMinuteBar[], interval: Exclude<Interval, 1>, 
 
   const bars: AggregatedBar[] = [];
   const formingPartials: string[] = [];
+  const fullRowsSettling: string[] = [];
+  const closedSettling: string[] = [];
+  const closedSettlingPartials: string[] = [];
   const windowEdgePartials: string[] = [];
   const trueBarGaps: string[] = [];
 
@@ -528,7 +549,7 @@ function aggregate1mBars(raw1m: RawMinuteBar[], interval: Exclude<Interval, 1>, 
     const rowMap = new Map(rows.map((r) => [r.time, r]));
     const present = expected.filter((t) => rowMap.has(t));
     const missing = expected.filter((t) => !rowMap.has(t));
-    const bucketCompleteByClock = isBucketEndComplete(label, now);
+    const timingPhase = bucketTimingPhase(label, now);
     const sessionKey = sessionKeyForTime(label);
     const earliest = sessionKey ? earliestBySession.get(sessionKey) : undefined;
     const allMissingBeforeWindow = Boolean(earliest && missing.length > 0 && missing.every((t) => t < earliest));
@@ -541,10 +562,23 @@ function aggregate1mBars(raw1m: RawMinuteBar[], interval: Exclude<Interval, 1>, 
       return r.bar_state === "COMPLETED" || r.bar_state === "AUCTION_SEED";
     });
 
-    if (!bucketCompleteByClock) {
+    if (timingPhase === "FORMING") {
       bucketState = "FORMING";
-      partialKind = "FORMING_PARTIAL";
-      formingPartials.push(`${label}: ${present.length}/${expected.length}`);
+      if (allExpectedPresent) {
+        partialKind = "FULL_ROWS_SETTLING";
+        fullRowsSettling.push(`${label}: ${present.length}/${expected.length}`);
+      } else {
+        partialKind = "FORMING_PARTIAL";
+        formingPartials.push(`${label}: ${present.length}/${expected.length}`);
+      }
+    } else if (timingPhase === "CLOSED_SETTLING") {
+      bucketState = "CLOSED_SETTLING";
+      if (!allExpectedPresent || !allSourcesReady) {
+        partialKind = "CLOSED_SETTLING_PARTIAL";
+        closedSettlingPartials.push(`${label}: ${present.length}/${expected.length}; missing=${missing.join(",")}`);
+      } else {
+        closedSettling.push(`${label}: ${present.length}/${expected.length}`);
+      }
     } else if (!allExpectedPresent && allMissingBeforeWindow) {
       bucketState = "WINDOW_EDGE_PARTIAL";
       partialKind = "WINDOW_EDGE_PARTIAL";
@@ -582,13 +616,18 @@ function aggregate1mBars(raw1m: RawMinuteBar[], interval: Exclude<Interval, 1>, 
   return {
     bars,
     forming_partials: formingPartials,
+    full_rows_settling: fullRowsSettling,
+    closed_settling: closedSettling,
+    closed_settling_partials: closedSettlingPartials,
     window_edge_partials: windowEdgePartials,
     true_bar_gaps: trueBarGaps
   };
 }
 
-function compareCompletedBars(nativeBars: RawMinuteBar[], aggregated: AggregatedBar[], maxCompare = 12) {
-  const nativeCompleted = nativeBars.filter((b) => b.bar_state === "COMPLETED");
+function compareCompletedBars(nativeBars: RawMinuteBar[], aggregated: AggregatedBar[], maxCompare = 12, now = new Date()) {
+  const nativeSettling = nativeBars.filter((b) => b.bar_state === "COMPLETED" && !isCrossVerificationEligible(b.time, now));
+  const aggSettling = aggregated.filter((b) => b.bucket_state === "CLOSED_SETTLING");
+  const nativeCompleted = nativeBars.filter((b) => b.bar_state === "COMPLETED" && isCrossVerificationEligible(b.time, now));
   const aggCompleted = aggregated.filter((b) => b.bucket_state === "COMPLETED");
   const nativeMap = new Map(nativeCompleted.map((b) => [b.time, b]));
   const aggMap = new Map(aggCompleted.map((b) => [b.time, b]));
@@ -647,13 +686,21 @@ function compareCompletedBars(nativeBars: RawMinuteBar[], aggregated: Aggregated
   }
 
   return {
-    comparison_scope: "COMPLETED_BARS_ONLY",
+    comparison_scope: "VERIFICATION_ELIGIBLE_COMPLETED_BARS_ONLY",
     status: common.length === 0 ? "NO_COMMON_COMPLETED_BARS" : mismatchCount === 0 ? "PASS" : "CONFLICT",
     compared_count: common.length,
     exact_match_count: exactMatchCount,
     mismatch_count: mismatchCount,
     full_window_exact_match: common.length > 0 && exactMatchCount === common.length,
     full_window_within_tolerance: common.length > 0 && mismatchCount === 0,
+    settling_excluded_labels: [...new Set([
+      ...nativeSettling.map((b) => b.time),
+      ...aggSettling.map((b) => b.time)
+    ])].sort(),
+    settling_excluded_count: new Set([
+      ...nativeSettling.map((b) => b.time),
+      ...aggSettling.map((b) => b.time)
+    ]).size,
     bars: comparisons
   };
 }
@@ -700,8 +747,10 @@ function commonMetadata(now = new Date()) {
       formal_gate: cal.is_trading_day === true ? "CALENDAR_PASS" : "CALENDAR_FAIL_CLOSED"
     },
     session_calendar_note: "2026_SSE_SZSE_OFFICIAL_HOLIDAYS_EMBEDDED; WEEKENDS_CLOSED; OUTSIDE_2026_CALENDAR_UNVERIFIED_FAIL_CLOSED",
-    completion_model: "TENCENT_LABEL_IS_BAR_END; COMPLETED_AFTER_BAR_END_PLUS_5_SECONDS",
-    completion_grace_ms: COMPLETION_GRACE_MS,
+    completion_model: "TENCENT_LABEL_IS_BAR_END; BAR_CLOSED_AFTER_5S; CROSS_VERIFICATION_ELIGIBLE_AFTER_30S",
+    completion_grace_ms: BAR_CLOSE_GRACE_MS,
+    bar_close_grace_ms: BAR_CLOSE_GRACE_MS,
+    cross_sync_grace_ms: CROSS_SYNC_GRACE_MS,
     safety_status: "TEST_ONLY",
     formal_v3_trigger: "NOT_APPROVED",
     formal_trigger_allowed: false
@@ -881,7 +930,7 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
 
   let oneBars: RawMinuteBar[] = [];
   let aggregation: AggregationResult = {
-    bars: [], forming_partials: [], window_edge_partials: [], true_bar_gaps: []
+    bars: [], forming_partials: [], full_rows_settling: [], closed_settling: [], closed_settling_partials: [], window_edge_partials: [], true_bar_gaps: []
   };
   if (one.ok) {
     oneBars = parseMinuteRows(one.rows, one.fetched_at);
@@ -893,13 +942,15 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
 
   const aggCompleted = aggregation.bars.filter((b) => b.bucket_state === "COMPLETED").slice(-windowPlan.effective_limit);
   const aggForming = aggregation.bars.filter((b) => b.bucket_state === "FORMING");
-  const nativeCompleted = nativeBars.filter((b) => b.bar_state === "COMPLETED").slice(-windowPlan.effective_limit);
+  const aggSettling = aggregation.bars.filter((b) => b.bucket_state === "CLOSED_SETTLING");
+  const nativeCompleted = nativeBars.filter((b) => b.bar_state === "COMPLETED" && isCrossVerificationEligible(b.time, doneAt)).slice(-windowPlan.effective_limit);
+  const nativeSettling = nativeBars.filter((b) => b.bar_state === "COMPLETED" && !isCrossVerificationEligible(b.time, doneAt));
   const nativeForming = nativeBars.filter((b) => b.bar_state === "FORMING");
 
   const cross = one.ok && native.ok
-    ? compareCompletedBars(nativeBars, aggregation.bars, Math.min(12, windowPlan.effective_limit))
+    ? compareCompletedBars(nativeBars, aggregation.bars, Math.min(12, windowPlan.effective_limit), doneAt)
     : {
-        comparison_scope: "COMPLETED_BARS_ONLY",
+        comparison_scope: "VERIFICATION_ELIGIBLE_COMPLETED_BARS_ONLY",
         status: "NOT_AVAILABLE",
         compared_count: 0,
         exact_match_count: 0,
@@ -922,7 +973,7 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
   } else if (hasTrueGap) {
     dataStatus = "TRUE_BAR_GAP";
   } else if (aggUsable && nativeUsable && cross.status === "PASS") {
-    dataStatus = "OK";
+    dataStatus = (aggSettling.length > 0 || nativeSettling.length > 0) ? "SYNC_SETTLING" : "OK";
     dataGrade = "A";
     preferredPath = "AGGREGATED_FROM_TENCENT_1M_VERIFIED_BY_TENCENT_NATIVE_COMPLETED_ONLY";
   } else if (aggUsable && nativeUsable && cross.status === "CONFLICT") {
@@ -951,6 +1002,10 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
           : (nativeForming.length ? nativeForming[nativeForming.length - 1] : null))
       : null;
 
+  const topSettling = dataGrade === "A"
+    ? (aggSettling.length ? aggSettling[aggSettling.length - 1] : null)
+    : null;
+
   return {
     ...commonMetadata(doneAt),
     symbol,
@@ -964,8 +1019,22 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
     returned_completed_bars: topCompleted.length,
     completed_bars: topCompleted,
     forming_bar: topForming,
+    settling_bar: topSettling,
+    latest_bar_verification: topSettling ? "SYNC_SETTLING" : topForming ? "FORMING" : dataGrade === "A" ? "VERIFIED" : "UNAVAILABLE",
+    formal_candidate_status: interval === 5
+      ? (topSettling
+          ? "WAIT_SYNC_SETTLING"
+          : topForming
+            ? "WAIT_BAR_CLOSE"
+            : dataGrade === "A"
+              ? "GRADE_A_CANDIDATE_ONLY_SEPARATE_V3_APPROVAL_REQUIRED"
+              : "NOT_ELIGIBLE")
+      : "NOT_APPLICABLE_OR_AUXILIARY",
     aggregation_diagnostics: {
       forming_partials: aggregation.forming_partials,
+      full_rows_settling: aggregation.full_rows_settling,
+      closed_settling: aggregation.closed_settling,
+      closed_settling_partials: aggregation.closed_settling_partials,
       window_edge_partials: aggregation.window_edge_partials,
       true_bar_gaps: aggregation.true_bar_gaps,
       true_bar_gap_count: aggregation.true_bar_gaps.length
@@ -974,7 +1043,11 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
       status: aggUsable ? "OK" : one.ok ? "NO_COMPLETE_AGGREGATED_BARS" : "DOWN",
       completed_bars: aggCompleted,
       forming_bar: aggForming.length ? aggForming[aggForming.length - 1] : null,
+      settling_bar: aggSettling.length ? aggSettling[aggSettling.length - 1] : null,
       forming_partials: aggregation.forming_partials,
+      full_rows_settling: aggregation.full_rows_settling,
+      closed_settling: aggregation.closed_settling,
+      closed_settling_partials: aggregation.closed_settling_partials,
       window_edge_partials: aggregation.window_edge_partials,
       true_bar_gaps: aggregation.true_bar_gaps,
       source_1m_integrity: one.ok ? integrityCheck(oneBars) : { ok: false, issues: ["NO_1M_DATA"] },
@@ -986,6 +1059,7 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
       status: nativeUsable ? "OK" : native.ok ? "NO_COMPLETE_NATIVE_BARS" : "DOWN",
       completed_bars: nativeCompleted,
       forming_bar: nativeForming.length ? nativeForming[nativeForming.length - 1] : null,
+      settling_bar: nativeSettling.length ? nativeSettling[nativeSettling.length - 1] : null,
       raw_tail: nativeBars.slice(-6),
       integrity: native.ok ? integrityCheck(nativeBars) : { ok: false, issues: ["NO_NATIVE_DATA"] },
       fetch_meta: native.fetch_meta,
@@ -995,7 +1069,7 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
     quote_diagnostics: quote,
     volume_validation: computeVolumeValidation(oneBars, quote, doneAt),
     fetched_at_beijing: beijingNowParts(doneAt).iso,
-    timestamp_semantics: "BAR_END_SUPPORTED_BY_2026-08-12_LIVE_TESTS; CROSS_CHECK_COMPLETED_BARS_ONLY",
+    timestamp_semantics: "BAR_END_SUPPORTED_BY_2026-08-12_LIVE_TESTS; 5S_BAR_CLOSE_GRACE; 30S_CROSS_SYNC_SETTLING; CROSS_CHECK_VERIFICATION_ELIGIBLE_BARS_ONLY",
     field_semantics: {
       native_columns: ["time", "open", "close", "high", "low", "volume_raw", "raw_extra_1", "raw_extra_2"],
       volume_unit: "UNVERIFIED_TENCENT_RAW",
@@ -1055,16 +1129,16 @@ function runLogicSelfTest() {
   const f = firstAgg.bars.find((b) => b.time.endsWith("09:35"));
   cases.push({
     name: "AM_FIRST_5M_INCLUDES_0930_AUCTION_SEED",
-    pass: Boolean(f?.is_complete && f.source_rows === 6 && f.expected_rows === 6 && f.volume_raw === 126418 && firstAgg.true_bar_gaps.length === 0),
+    pass: Boolean(f?.bucket_state === "CLOSED_SETTLING" && f.source_rows === 6 && f.expected_rows === 6 && f.volume_raw === 126418 && firstAgg.true_bar_gaps.length === 0),
     observed: f ?? null
   });
 
-  const ordinaryNow = bjDate("2026-08-12 09:40:10");
+  const ordinaryNow = bjDate("2026-08-12 09:40:31");
   const ordinaryRows = [36, 37, 38, 39, 40].map((m, i) => syntheticRaw(`2026-08-12 09:${m}`, 10 + i, 10.5 + i, 9.5 + i, 10.2 + i, 100 + i, ordinaryNow));
   const ordinaryAgg = aggregate1mBars(ordinaryRows, 5, ordinaryNow);
   const o = ordinaryAgg.bars.find((b) => b.time.endsWith("09:40"));
   cases.push({
-    name: "ORDINARY_5M_COMPLETES_AFTER_BAR_END_PLUS_GRACE",
+    name: "ORDINARY_5M_COMPLETES_AFTER_CROSS_SYNC_GRACE",
     pass: Boolean(o?.is_complete && ordinaryAgg.true_bar_gaps.length === 0),
     observed: o ?? null
   });
@@ -1117,19 +1191,85 @@ function runLogicSelfTest() {
   const p = pmAgg.bars.find((b) => b.time.endsWith("13:05"));
   cases.push({
     name: "PM_FIRST_5M_IS_1301_TO_1305_ONLY",
-    pass: Boolean(p?.is_complete && p.source_rows === 5 && p.source_times.every((x) => x.includes("13:0"))),
+    pass: Boolean(p?.bucket_state === "CLOSED_SETTLING" && p.source_rows === 5 && p.source_times.every((x) => x.includes("13:0"))),
     observed: p ?? null
   });
 
+  const crossNow = bjDate("2026-08-12 13:06:00");
+  const pmRowsForCross = [1, 2, 3, 4, 5].map((m, i) => syntheticRaw(`2026-08-12 13:0${m}`, 19.77 - i * 0.005, 19.77, 19.75, 19.75, [11035, 5939, 5660, 5220, 5234][i], crossNow));
+  const pmAggForCross = aggregate1mBars(pmRowsForCross, 5, crossNow);
   const nativeForCross: RawMinuteBar[] = [
-    syntheticRaw("2026-08-12 13:05", 19.77, 19.77, 19.75, 19.75, 33088, bjDate("2026-08-12 13:06:00")),
-    syntheticRaw("2026-08-12 13:10", 19.75, 19.76, 19.74, 19.75, 9999, bjDate("2026-08-12 13:06:00"))
+    syntheticRaw("2026-08-12 13:05", 19.77, 19.77, 19.75, 19.75, 33088, crossNow),
+    syntheticRaw("2026-08-12 13:10", 19.75, 19.76, 19.74, 19.75, 9999, crossNow)
   ];
-  const cross = compareCompletedBars(nativeForCross, pmAgg.bars, 12);
+  const cross = compareCompletedBars(nativeForCross, pmAggForCross.bars, 12, crossNow);
   cases.push({
     name: "CROSS_CHECK_IGNORES_FORMING_BARS",
     pass: cross.status === "PASS" && cross.compared_count === 1 && cross.mismatch_count === 0,
     observed: cross
+  });
+
+
+  const preCloseNow = bjDate("2026-08-12 10:20:03");
+  const syncRows: RawMinuteBar[] = [];
+  for (let m = 11; m <= 20; m++) {
+    syncRows.push(syntheticRaw(`2026-08-12 10:${pad2(m)}`, 19.4, 19.5, 19.3, 19.4, m <= 15 ? 100 : [4000, 4200, 4300, 5000, 5545][m - 16], preCloseNow));
+  }
+  const preCloseAgg = aggregate1mBars(syncRows, 5, preCloseNow);
+  const preCloseBar = preCloseAgg.bars.find((b) => b.time.endsWith("10:20"));
+  cases.push({
+    name: "FULL_ROWS_BEFORE_5S_IS_SETTLING_NOT_GAP",
+    pass: Boolean(preCloseBar?.bucket_state === "FORMING" && preCloseBar.partial_kind === "FULL_ROWS_SETTLING" && preCloseAgg.true_bar_gaps.length === 0),
+    observed: preCloseBar ?? null
+  });
+
+  const settlingNow = bjDate("2026-08-12 10:20:12");
+  const settlingAgg = aggregate1mBars(syncRows, 5, settlingNow);
+  const settlingBar = settlingAgg.bars.find((b) => b.time.endsWith("10:20"));
+  cases.push({
+    name: "BAR_AFTER_5S_BEFORE_30S_IS_CLOSED_SETTLING",
+    pass: Boolean(settlingBar?.bucket_state === "CLOSED_SETTLING" && settlingBar.is_complete === false && settlingAgg.true_bar_gaps.length === 0),
+    observed: settlingBar ?? null
+  });
+
+  const nativeSettlingTest: RawMinuteBar[] = [
+    syntheticRaw("2026-08-12 10:15", 19.4, 19.5, 19.3, 19.4, 500, settlingNow),
+    syntheticRaw("2026-08-12 10:20", 19.4, 19.5, 19.3, 19.4, 22545, settlingNow)
+  ];
+  const settlingCross = compareCompletedBars(nativeSettlingTest, settlingAgg.bars, 12, settlingNow);
+  cases.push({
+    name: "CROSS_IGNORES_CLOSED_SETTLING_MISMATCH",
+    pass: settlingCross.status === "PASS" && settlingCross.settling_excluded_labels.some((x: string) => x.endsWith("10:20")) && settlingCross.mismatch_count === 0,
+    observed: settlingCross
+  });
+
+  const verifyNow = bjDate("2026-08-12 10:20:31");
+  const verifiedSyncRows: RawMinuteBar[] = [];
+  for (let m = 11; m <= 20; m++) {
+    verifiedSyncRows.push(syntheticRaw(`2026-08-12 10:${pad2(m)}`, 19.4, 19.5, 19.3, 19.4, m <= 15 ? 100 : [4000, 4200, 4300, 5000, 5545][m - 16], verifyNow));
+  }
+  const verifiedAgg = aggregate1mBars(verifiedSyncRows, 5, verifyNow);
+  const staleNative: RawMinuteBar[] = [
+    syntheticRaw("2026-08-12 10:15", 19.4, 19.5, 19.3, 19.4, 500, verifyNow),
+    syntheticRaw("2026-08-12 10:20", 19.4, 19.5, 19.3, 19.4, 22545, verifyNow)
+  ];
+  const staleCross = compareCompletedBars(staleNative, verifiedAgg.bars, 12, verifyNow);
+  cases.push({
+    name: "PERSISTENT_MISMATCH_AFTER_30S_FAILS_CLOSED",
+    pass: staleCross.status === "CONFLICT" && staleCross.mismatch_count >= 1,
+    observed: staleCross
+  });
+
+  const finalVolume = verifiedAgg.bars.find((b) => b.time.endsWith("10:20"))?.volume_raw ?? 0;
+  const syncedNative: RawMinuteBar[] = [
+    syntheticRaw("2026-08-12 10:15", 19.4, 19.5, 19.3, 19.4, 500, verifyNow),
+    syntheticRaw("2026-08-12 10:20", 19.4, 19.5, 19.3, 19.4, finalVolume, verifyNow)
+  ];
+  const syncedCross = compareCompletedBars(syncedNative, verifiedAgg.bars, 12, verifyNow);
+  cases.push({
+    name: "MATCH_AFTER_30S_BECOMES_VERIFIED",
+    pass: syncedCross.status === "PASS" && syncedCross.mismatch_count === 0,
+    observed: syncedCross
   });
 
   const calendarWeekday = tradingCalendarInfo("2026-08-17");
@@ -1231,11 +1371,11 @@ async function buildHealthResponse() {
 
   const oneBars = one.ok ? parseMinuteRows(one.rows, one.fetched_at) : [];
   const agg = one.ok ? aggregate1mBars(oneBars, 5, one.fetched_at) : {
-    bars: [], forming_partials: [], window_edge_partials: [], true_bar_gaps: []
+    bars: [], forming_partials: [], full_rows_settling: [], closed_settling: [], closed_settling_partials: [], window_edge_partials: [], true_bar_gaps: []
   };
   const nativeBars = native5.ok ? parseMinuteRows(native5.rows, native5.fetched_at) : [];
-  const cross = one.ok && native5.ok ? compareCompletedBars(nativeBars, agg.bars, 12) : {
-    comparison_scope: "COMPLETED_BARS_ONLY",
+  const cross = one.ok && native5.ok ? compareCompletedBars(nativeBars, agg.bars, 12, ended) : {
+    comparison_scope: "VERIFICATION_ELIGIBLE_COMPLETED_BARS_ONLY",
     status: "NOT_AVAILABLE",
     compared_count: 0,
     exact_match_count: 0,
@@ -1249,6 +1389,7 @@ async function buildHealthResponse() {
   const m1Forming = oneBars.filter((b) => b.bar_state === "FORMING");
   const m5Completed = agg.bars.filter((b) => b.bucket_state === "COMPLETED");
   const m5Forming = agg.bars.filter((b) => b.bucket_state === "FORMING");
+  const m5Settling = agg.bars.filter((b) => b.bucket_state === "CLOSED_SETTLING");
   const m1Ok = one.ok && integrityCheck(oneBars).ok;
   const m5A = one.ok && native5.ok && cross.status === "PASS" && agg.true_bar_gaps.length === 0 && m5Completed.length > 0;
 
@@ -1260,7 +1401,7 @@ async function buildHealthResponse() {
     readiness: {
       quote: quote.ok ? "READY_FOR_TEST" : "DOWN",
       minute_1m: m1Ok ? "READY_FOR_TEST" : "DOWN",
-      minute_5m: m5A ? "GRADE_A_TEST_READY" : "NOT_GRADE_A",
+      minute_5m: m5A ? (m5Settling.length ? "GRADE_A_BASE_READY_LATEST_BAR_SYNC_SETTLING" : "GRADE_A_TEST_READY") : "NOT_GRADE_A",
       formal_v3_trigger: "NOT_APPROVED"
     },
     state: {
@@ -1269,10 +1410,15 @@ async function buildHealthResponse() {
       forming_1m: m1Forming.length ? m1Forming[m1Forming.length - 1] : null,
       auction_seed_1m: oneBars.filter((b) => b.bar_state === "AUCTION_SEED").slice(-1)[0] ?? null,
       latest_completed_5m: m5Completed.length ? m5Completed[m5Completed.length - 1].time : null,
+      latest_verified_completed_5m: m5Completed.length ? m5Completed[m5Completed.length - 1].time : null,
       forming_5m: m5Forming.length ? m5Forming[m5Forming.length - 1] : null,
+      settling_5m: m5Settling.length ? m5Settling[m5Settling.length - 1] : null,
       true_gap_count: agg.true_bar_gaps.length,
       window_edge_partial_count: agg.window_edge_partials.length,
       forming_partial_count: agg.forming_partials.length,
+      full_rows_settling_count: agg.full_rows_settling.length,
+      closed_settling_count: agg.closed_settling.length,
+      closed_settling_partial_count: agg.closed_settling_partials.length,
       cross_completed_status: cross.status,
       calendar_gate: tradingCalendarInfo(beijingNowParts(ended).date).is_trading_day === true ? "PASS" : "FAIL_CLOSED"
     },
@@ -1288,6 +1434,9 @@ async function buildHealthResponse() {
         grade_a: m5A,
         aggregation_diagnostics: {
           forming_partials: agg.forming_partials,
+          full_rows_settling: agg.full_rows_settling,
+          closed_settling: agg.closed_settling,
+          closed_settling_partials: agg.closed_settling_partials,
           window_edge_partials: agg.window_edge_partials,
           true_bar_gaps: agg.true_bar_gaps
         },
@@ -1309,7 +1458,7 @@ function createServer() {
     "get_tencent_minute_kline",
     {
       description:
-        "腾讯分钟K RC2测试。正式候选只支持1/5/15分钟；为兼容旧ChatGPT工具快照仍接受30/60输入，但会结构化返回UNSUPPORTED_INTERVAL，不会静默生成不完整数据。5/15分钟用腾讯1分钟本地聚合，并只对双方已完成K与腾讯原生周期交叉验证。含09:30集合竞价seed、午休/下午session、窗口边缘/真缺口分类和fail-closed。仅测试，禁止直接作为BSI-SWING_V3正式触发。",
+        "腾讯分钟K RC3测试。正式候选只支持1/5/15分钟；为兼容旧ChatGPT工具快照仍接受30/60输入，但会结构化返回UNSUPPORTED_INTERVAL，不会静默生成不完整数据。5/15分钟用腾讯1分钟本地聚合，并只对双方已完成K与腾讯原生周期交叉验证。含09:30集合竞价seed、午休/下午session、窗口边缘/真缺口分类和fail-closed。仅测试，禁止直接作为BSI-SWING_V3正式触发。",
       inputSchema: {
         code: z.string().describe("证券代码。普通股票可写300059；指数/易歧义代码请显式写交易所前缀，例如sh000300；ETF建议写sh510300/sz159919"),
         interval: z.union([z.literal(1), z.literal(5), z.literal(15), z.literal(30), z.literal(60)]).default(5),
@@ -1328,11 +1477,11 @@ function createServer() {
                 data_grade: "C",
                 requested_interval: `${interval}m`,
                 supported_intervals: ["1m", "5m", "15m"],
-                compatibility_note: "30m/60m inputs are accepted only to remain compatible with older ChatGPT tool snapshots; RC2 does not treat them as validated formal candidates because the Tencent 1m request window is capped.",
+                compatibility_note: "30m/60m inputs are accepted only to remain compatible with older ChatGPT tool snapshots; RC3 does not treat them as validated formal candidates because the Tencent 1m request window is capped.",
                 safety_status: "TEST_ONLY",
                 formal_v3_trigger: "NOT_APPROVED",
                 formal_trigger_allowed: false,
-                error: "30m/60m are intentionally disabled in RC2"
+                error: "30m/60m are intentionally disabled in RC3"
               }, null, 2)
             }]
           };
@@ -1362,7 +1511,7 @@ function createServer() {
     "tencent_minute_health",
     {
       description:
-        "腾讯分钟K RC2健康检查。复用一次quote、一次1m和一次原生5m请求，输出session、latest completed、forming、真缺口、窗口边缘和仅completed跨路径校验。",
+        "腾讯分钟K RC3健康检查。复用一次quote、一次1m和一次原生5m请求，输出session、latest completed、forming、真缺口、窗口边缘和仅completed跨路径校验。",
       inputSchema: {}
     },
     async () => {
@@ -1375,7 +1524,7 @@ function createServer() {
     "tencent_minute_logic_selftest",
     {
       description:
-        "离线逻辑自测，不依赖交易日或实时行情。验证09:30集合竞价seed、普通5m完成、forming不误报gap、窗口边缘不误报gap、真缺口、午休、下午重开以及cross-check只比较completed。",
+        "离线逻辑自测，不依赖交易日或实时行情。验证09:30集合竞价seed、5秒bar-close、30秒cross-sync settling、forming/window-edge/真缺口、午休、下午重开，以及settling阶段不误报PATH_CONFLICT。",
       inputSchema: {}
     },
     async () => {

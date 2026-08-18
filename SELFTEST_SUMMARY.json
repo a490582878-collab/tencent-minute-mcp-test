@@ -1,0 +1,8 @@
+{
+  "version": "TENCENT_MINUTE_TEST_0.2_RC3",
+  "mode": "OFFLINE_LOGIC_SELFTEST_NO_LIVE_MARKET_REQUIRED",
+  "total": 22,
+  "passed": 22,
+  "failed": 0,
+  "formal_v3_trigger": "NOT_APPROVED"
+}

@@ -1,30 +1,32 @@
-TENCENT_MINUTE_TEST_0.2_RC2 GitHub 替换指南
+TENCENT_MINUTE_TEST_0.2_RC3 - GitHub replacement guide
 
-最省事：
-- 直接把 ZIP 内文件按原目录覆盖到现有 GitHub 仓库。
+Recommended: replace the whole project with the ZIP contents.
 
-必须替换：
+Minimum files to replace:
 1. src/server.ts
 2. package.json
-3. README.md
-4. REPLACE_GUIDE.txt（仅说明文件，可选）
+3. wrangler.jsonc
+4. tsconfig.json
 
-wrangler.jsonc：
-- 本包已保留部署成功的 Fix1 配置：只使用 nodejs_compat。
-- 建议一并覆盖，避免误恢复已删除的 text_decoder_cjk_decoder。
+wrangler.jsonc intentionally keeps only:
+  compatibility_flags: ["nodejs_compat"]
+Do NOT re-add text_decoder_cjk_decoder.
 
-无需修改：
-- Worker 名称仍为 tencent-minute-mcp-test
-- MCP URL 不变
-- get_tencent_minute_kline 工具名不变
-- tencent_minute_health 工具名不变
-- 现有主工具输入字段不变
+After GitHub commit:
+1. Wait for Cloudflare deployment to turn green.
+2. In ChatGPT call Tencent minute health.
+3. Confirm version = TENCENT_MINUTE_TEST_0.2_RC3.
+4. Confirm health can call quote / 1m / 5m.
+5. Perform one ordinary 5-minute live boundary validation.
 
-上传并部署后：
-1. 告诉 ChatGPT：“已经部署RC2，请直接回测”。
-2. 先调用 tencent_minute_health 确认 version=TENCENT_MINUTE_TEST_0.2_RC2。
-3. 再测试 300059 1m / 5m / 15m、sh000300、ETF、BSE拒绝路径。
-4. 检查：trading_calendar、calendar_gate、request_window、volume_validation、true_bar_gaps、cross_path_check。
+Expected RC3 live boundary behavior:
+- Before bar_end+5s: FORMING / FULL_ROWS_SETTLING.
+- bar_end+5s to +30s: CLOSED_SETTLING / data_status may be SYNC_SETTLING.
+- No PATH_CONFLICT may be generated solely from a mismatch inside the sync-settling window.
+- After bar_end+30s: cross verification becomes eligible.
+- Persistent mismatch after +30s => PATH_CONFLICT fail-closed.
+- Match after +30s => Grade A / OK.
 
-预期安全状态：
-TEST_ONLY / formal_v3_trigger=NOT_APPROVED / formal_trigger_allowed=false
+Safety remains:
+  TEST_ONLY
+  formal_v3_trigger = NOT_APPROVED

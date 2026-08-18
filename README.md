@@ -1,74 +1,72 @@
-# Tencent Minute MCP Test 0.2 RC2
+# Tencent Minute MCP Test 0.2 RC3
 
-基于 RC1 实盘/历史回测结果继续收敛的候选测试版。目标是降低剩余生产化风险，但仍然只用于测试，不直接作为 BSI-SWING_V3 正式触发源。
+Version: `TENCENT_MINUTE_TEST_0.2_RC3`
 
-## RC2 相比 RC1 的新增优化
+This is a TEST-ONLY release. It must not be treated as an approved formal BSI-SWING_V3 trigger source.
 
-1. **嵌入 2026 年沪深交易所官方休市日历**
-   - 周末自动 `NON_TRADING_DAY`
-   - 2026 官方休市日自动 `NON_TRADING_DAY`
-   - 2026 年以外返回 `CALENDAR_UNVERIFIED`，不猜测，保持 fail-closed
-   - 来源：上交所/深交所 2026 年部分节假日休市安排通知（2025-12-22）
+## Why RC3 exists
 
-2. **请求窗口容量显式化**
-   - 1m：可靠输出上限 60 根 completed
-   - 5m：可靠输出上限 60 根 completed
-   - 15m：保守可靠输出上限 20 根 completed
-   - 超出时不静默伪装完整，而在 `request_window` 中明确给出 `requested_limit_supported=false`、`effective_limit` 和说明
+RC2 live testing at the 2026-08-17 10:20 five-minute boundary showed that Tencent 1m aggregation can finish before Tencent native 5m has finished synchronizing its final volume. At about +12 seconds, OHLC matched but volume could still differ; by about +21 seconds the two paths matched again.
 
-3. **新增 volume 只读诊断，不升级单位语义**
-   - `volume_validation` 比较当日 1m `volume_raw` 累计与 quote `volume_lot`
-   - 仅作为同尺度/快照一致性证据
-   - `unit_conclusion` 仍固定为 `UNVERIFIED_TENCENT_RAW`
-   - `use_for_formal_gate=false`
+RC3 keeps the verified BAR_END timestamp model but adds a synchronization-settling layer:
 
-4. **修正 window-edge 分类的潜在漏检**
-   - 只有“所有缺失分钟都位于请求窗口起点之前”才算 `WINDOW_EDGE_PARTIAL`
-   - 如果同一个桶同时存在窗口边缘缺失和窗口内部缺失，内部缺失仍会被识别为 `TRUE_BAR_GAP`
+- bar end + 0s to +5s: `FORMING`
+- bar end + 5s to +30s: `CLOSED_SETTLING`
+- bar end +30s onward: eligible for completed cross-path verification
+- only a mismatch that persists after the 30-second sync window may become `PATH_CONFLICT`
 
-5. **浮点数机器误差不再降低 exact_match**
-   - 类似 `30997.03` vs `30997.030000000002` 不再被当成非精确匹配
-   - 正式容差标准不放宽，只处理机器浮点尾差
+This avoids the RC2 false conflict window without returning to a full 5-minute delay.
 
-6. **health 增强**
-   - 1m 一次取 280 行，尽量覆盖完整当日，用于 volume 诊断
-   - quote 放到分钟数据之后取，降低诊断快照错位
-   - 输出 `calendar_gate` 和 `volume_validation`
+## Main RC3 changes
 
-## RC1 已保留的核心规则
+1. `BAR_CLOSE_GRACE_MS = 5000`
+2. `CROSS_SYNC_GRACE_MS = 30000`
+3. New bucket state: `CLOSED_SETTLING`
+4. New diagnostics:
+   - `FULL_ROWS_SETTLING`
+   - `CLOSED_SETTLING_PARTIAL`
+   - `closed_settling`
+   - `settling_bar`
+5. Cross-path comparison scope is now `VERIFICATION_ELIGIBLE_COMPLETED_BARS_ONLY`
+6. Bars inside the 30-second sync window are excluded from conflict detection and listed in `settling_excluded_labels`
+7. `SYNC_SETTLING` is returned when verified history is healthy but the newest closed bar is still waiting for Tencent path synchronization
+8. `formal_candidate_status` returns `WAIT_SYNC_SETTLING` or `WAIT_BAR_CLOSE` when appropriate
+9. Persistent mismatch after the sync window still fails closed as `PATH_CONFLICT`
 
-- 仅正式测试 1 / 5 / 15 分钟；30 / 60 不开放为正式候选
-- 腾讯标签按 BAR_END；结束后约 5 秒进入 completed
-- 09:30 为集合竞价/开盘 seed；上午第一根 5m/15m 纳入 seed
-- 11:30 上午结束，13:01 下午重新分桶
-- `FORMING_PARTIAL / WINDOW_EDGE_PARTIAL / TRUE_BAR_GAP` 三分法
-- cross-check 只比较双方 completed bar
-- 真正 completed 路径冲突 fail-closed
-- BSE quote 正常但 mkline 无行时返回 `UNSUPPORTED_UNVERIFIED_BSE_MINUTE`
-- 易歧义指数要求显式前缀，例如 `sh000300`
+## Existing RC2 safeguards retained
 
-## 工具兼容性
+- Formal validated intervals remain 1m / 5m / 15m only
+- 30m / 60m remain compatibility-only structured rejections
+- 09:30 opening auction seed is included in the first AM 5m/15m bucket
+- Lunch and PM session boundaries are separated
+- `FORMING_PARTIAL`, `WINDOW_EDGE_PARTIAL`, and `TRUE_BAR_GAP` remain distinct
+- BSE minute data remains fail-closed when Tencent returns no rows
+- Ambiguous bare index codes such as `000300` are rejected; use `sh000300`
+- 2026 SSE/SZSE trading calendar protection remains embedded
+- volume semantics remain `UNVERIFIED_TENCENT_RAW`
 
-RC2 **不修改现有主工具名称，并兼容旧工具快照的 interval 枚举**：
+## Offline validation
 
-- `get_tencent_minute_kline`
-- `tencent_minute_health`
+RC3 offline logic self-test: `22 / 22 PASS`.
 
-如果旧 ChatGPT 工具快照仍允许 30/60，RC2 会结构化返回 `UNSUPPORTED_INTERVAL`，而不是协议报错或静默返回不完整历史；正式候选仍只有 1/5/15。
+The self-test includes the exact RC2 failure mode:
 
-服务器中仍保留 `tencent_minute_logic_selftest`。如果 ChatGPT Draft App 的工具快照没有暴露它，不影响主工具回测；无需为了 RC2 强制重建 App。
+- +3s full rows -> settling, not gap
+- +12s stale native-vs-aggregate mismatch -> excluded from conflict
+- +31s persistent mismatch -> conflict
+- +31s synchronized values -> verified PASS
 
-## 安全状态
+## Deployment
 
-- `safety_status=TEST_ONLY`
-- `formal_v3_trigger=NOT_APPROVED`
-- `formal_trigger_allowed=false`
-- `volume_raw=UNVERIFIED_TENCENT_RAW`
-- volume 诊断不参与正式交易 gate
+Replace the GitHub project files with this package, commit, and let Cloudflare redeploy.
 
-## 官方日历来源
+After deployment, confirm the returned version is:
 
-- SSE: https://www.sse.com.cn/disclosure/announcement/general/c/c_20251222_10802507.shtml
-- SZSE: https://www.szse.cn/disclosure/notice/general/t20251222_618087.html
+`TENCENT_MINUTE_TEST_0.2_RC3`
 
-2027 年及以后需要更新官方休市日历后才能解除 `CALENDAR_UNVERIFIED`。
+Then run one live ordinary 5-minute boundary test. The key expected sequence is:
+
+- just before / just after boundary: forming or full-rows settling
+- +5s to +30s: `SYNC_SETTLING`, no `PATH_CONFLICT`
+- after +30s: verified `OK` / Grade A if both paths have synchronized
+

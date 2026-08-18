@@ -1,0 +1,36 @@
+TENCENT_MINUTE_TEST_0.2_RC3 validation record
+
+Build basis:
+- Forked directly from RC2 source that was successfully deployed and live-tested.
+- RC3 only changes synchronization-settling / cross-verification timing and related diagnostics.
+
+Static check:
+- TypeScript syntax/type structure checked with local module stubs: PASS.
+- Full dependency-resolved Cloudflare build is NOT claimed in this container; final build validation remains GitHub -> Cloudflare deployment.
+
+Offline logic self-test:
+- total: 22
+- passed: 22
+- failed: 0
+
+RC3-specific cases passing:
+1. FULL_ROWS_BEFORE_5S_IS_SETTLING_NOT_GAP
+2. BAR_AFTER_5S_BEFORE_30S_IS_CLOSED_SETTLING
+3. CROSS_IGNORES_CLOSED_SETTLING_MISMATCH
+4. PERSISTENT_MISMATCH_AFTER_30S_FAILS_CLOSED
+5. MATCH_AFTER_30S_BECOMES_VERIFIED
+
+Other retained cases cover:
+- 09:30 AM auction seed
+- ordinary 5m aggregation
+- forming vs true gap
+- window-edge truncation vs true gap
+- lunch boundary
+- PM first bucket
+- trading calendar
+- volume diagnostic conservatism
+- 15m request-capacity behavior
+
+Formal status:
+- safety_status = TEST_ONLY
+- formal_v3_trigger = NOT_APPROVED
