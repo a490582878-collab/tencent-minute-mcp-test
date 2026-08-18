@@ -1,6 +1,6 @@
 {
-  "name": "tencent-minute-mcp-test",
-  "version": "0.2.2",
+  "name": "tencent-minute-mcp-v1-candidate",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {

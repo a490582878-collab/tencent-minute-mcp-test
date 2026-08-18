@@ -1,32 +1,28 @@
-TENCENT_MINUTE_TEST_0.2_RC3 - GitHub replacement guide
+TENCENT_MINUTE_V1.0_CANDIDATE GitHub replacement guide
 
-Recommended: replace the whole project with the ZIP contents.
+Fastest path:
+1. Back up the current RC3 repository/branch.
+2. Replace these files from this ZIP:
+   - src/server.ts
+   - package.json
+   - tsconfig.json
+   - wrangler.jsonc
+   - README.md
+3. Commit and push.
+4. Wait for Cloudflare Worker deployment to succeed.
+5. In ChatGPT tell me: "V1.0 Candidate 已部署，直接开始验收回测".
 
-Minimum files to replace:
-1. src/server.ts
-2. package.json
-3. wrangler.jsonc
-4. tsconfig.json
+No URL/tool-name migration is required:
+- Worker name remains: tencent-minute-mcp-test
+- Main tool remains: get_tencent_minute_kline
+- Health tool remains: tencent_minute_health
+- Offline test tool remains: tencent_minute_logic_selftest
 
-wrangler.jsonc intentionally keeps only:
-  compatibility_flags: ["nodejs_compat"]
-Do NOT re-add text_decoder_cjk_decoder.
+Expected safety state before acceptance:
+- version=TENCENT_MINUTE_V1.0_CANDIDATE
+- safety_status=RELEASE_CANDIDATE_TEST_ONLY
+- release_status=V1_0_CANDIDATE_PENDING_ACCEPTANCE
+- formal_v3_trigger=NOT_APPROVED
+- formal_trigger_allowed=false
 
-After GitHub commit:
-1. Wait for Cloudflare deployment to turn green.
-2. In ChatGPT call Tencent minute health.
-3. Confirm version = TENCENT_MINUTE_TEST_0.2_RC3.
-4. Confirm health can call quote / 1m / 5m.
-5. Perform one ordinary 5-minute live boundary validation.
-
-Expected RC3 live boundary behavior:
-- Before bar_end+5s: FORMING / FULL_ROWS_SETTLING.
-- bar_end+5s to +30s: CLOSED_SETTLING / data_status may be SYNC_SETTLING.
-- No PATH_CONFLICT may be generated solely from a mismatch inside the sync-settling window.
-- After bar_end+30s: cross verification becomes eligible.
-- Persistent mismatch after +30s => PATH_CONFLICT fail-closed.
-- Match after +30s => Grade A / OK.
-
-Safety remains:
-  TEST_ONLY
-  formal_v3_trigger = NOT_APPROVED
+Do NOT integrate into BSI-SWING_V3 until the acceptance report explicitly says PASS.

@@ -2,8 +2,8 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
-const VERSION = "TENCENT_MINUTE_TEST_0.2_RC3";
-const MCP_VERSION = "0.2.2";
+const VERSION = "TENCENT_MINUTE_V1.0_CANDIDATE";
+const MCP_VERSION = "1.0.0";
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 const BAR_CLOSE_GRACE_MS = 5_000;
 const CROSS_SYNC_GRACE_MS = 30_000;
@@ -71,6 +71,122 @@ function normalizeSymbol(input: string): string {
   if (/^[0123]/.test(raw)) return `sz${raw}`;
   if (/^[489]/.test(raw)) return `bj${raw}`;
   throw new Error(`无法可靠判断交易所: ${input}，请显式写 sh/sz/bj 前缀`);
+}
+
+
+type VolumeProfile = {
+  asset_class: "A_SHARE_STOCK" | "STAR_STOCK" | "ETF_FUND" | "INDEX" | "BSE_UNVERIFIED" | "UNKNOWN";
+  raw_unit: "SHARE" | "LOT_100_SHARES" | "LOT_100_UNITS" | "UNVERIFIED_TENCENT_RAW";
+  multiplier_to_base_units: number | null;
+  normalized_unit: "SHARE" | "FUND_UNIT" | null;
+  semantics_status: "EMPIRICALLY_VALIDATED_FAMILY_RULE_V1" | "UNVERIFIED_FAIL_CLOSED";
+  relative_volume_usable: boolean;
+  absolute_normalization_usable: boolean;
+  evidence_note: string;
+};
+
+function volumeProfileForSymbol(symbol: string): VolumeProfile {
+  const s = symbol.toLowerCase();
+
+  if (s.startsWith("bj")) {
+    return {
+      asset_class: "BSE_UNVERIFIED",
+      raw_unit: "UNVERIFIED_TENCENT_RAW",
+      multiplier_to_base_units: null,
+      normalized_unit: null,
+      semantics_status: "UNVERIFIED_FAIL_CLOSED",
+      relative_volume_usable: false,
+      absolute_normalization_usable: false,
+      evidence_note: "BSE minute support is not validated on the tested Tencent mkline path; no absolute-volume normalization is allowed."
+    };
+  }
+
+  if (/^sh000\d{3}$/.test(s) || /^sz399\d{3}$/.test(s)) {
+    return {
+      asset_class: "INDEX",
+      raw_unit: "UNVERIFIED_TENCENT_RAW",
+      multiplier_to_base_units: null,
+      normalized_unit: null,
+      semantics_status: "UNVERIFIED_FAIL_CLOSED",
+      relative_volume_usable: true,
+      absolute_normalization_usable: false,
+      evidence_note: "Index minute bars are usable for same-symbol relative-volume comparisons, but V1.0 does not assert a universal absolute unit for index volume."
+    };
+  }
+
+  if (/^sh688\d{3}$/.test(s)) {
+    return {
+      asset_class: "STAR_STOCK",
+      raw_unit: "SHARE",
+      multiplier_to_base_units: 1,
+      normalized_unit: "SHARE",
+      semantics_status: "EMPIRICALLY_VALIDATED_FAMILY_RULE_V1",
+      relative_volume_usable: true,
+      absolute_normalization_usable: true,
+      evidence_note: "Empirically validated on STAR samples sh688981 and sh688256 by Tencent minute/raw-volume versus independent turnover-amount price reconstruction. This is empirical, not official Tencent field documentation."
+    };
+  }
+
+  if (/^sh5\d{5}$/.test(s) || /^sz1\d{5}$/.test(s)) {
+    return {
+      asset_class: "ETF_FUND",
+      raw_unit: "LOT_100_UNITS",
+      multiplier_to_base_units: 100,
+      normalized_unit: "FUND_UNIT",
+      semantics_status: "EMPIRICALLY_VALIDATED_FAMILY_RULE_V1",
+      relative_volume_usable: true,
+      absolute_normalization_usable: true,
+      evidence_note: "Empirically validated on ETF samples sh510300 and sz159919. Raw volume is normalized with x100 fund units for absolute-volume use."
+    };
+  }
+
+  if (/^sh6\d{5}$/.test(s) || /^sz[03]\d{5}$/.test(s)) {
+    return {
+      asset_class: "A_SHARE_STOCK",
+      raw_unit: "LOT_100_SHARES",
+      multiplier_to_base_units: 100,
+      normalized_unit: "SHARE",
+      semantics_status: "EMPIRICALLY_VALIDATED_FAMILY_RULE_V1",
+      relative_volume_usable: true,
+      absolute_normalization_usable: true,
+      evidence_note: "Empirical family rule supported by live samples including sh601066, sz300059 and sz300308. Raw volume is normalized with x100 shares. This is empirical, not official Tencent field documentation."
+    };
+  }
+
+  return {
+    asset_class: "UNKNOWN",
+    raw_unit: "UNVERIFIED_TENCENT_RAW",
+    multiplier_to_base_units: null,
+    normalized_unit: null,
+    semantics_status: "UNVERIFIED_FAIL_CLOSED",
+    relative_volume_usable: true,
+    absolute_normalization_usable: false,
+    evidence_note: "V1.0 has no validated absolute-volume unit rule for this symbol family. Same-symbol relative-volume ratios may still use raw volume because the unit cancels."
+  };
+}
+
+function normalizedVolume(raw: number | null | undefined, profile: VolumeProfile): number | null {
+  if (raw == null || !profile.absolute_normalization_usable || profile.multiplier_to_base_units == null) return null;
+  return raw * profile.multiplier_to_base_units;
+}
+
+function withNormalizedVolume<T extends { volume_raw: number | null }>(bar: T, profile: VolumeProfile) {
+  return {
+    ...bar,
+    volume_normalized: normalizedVolume(bar.volume_raw, profile),
+    volume_normalized_unit: profile.normalized_unit,
+    volume_profile_status: profile.semantics_status
+  };
+}
+
+function withQuoteVolumeNormalization(quote: any, profile: VolumeProfile) {
+  if (!quote?.ok) return quote;
+  return {
+    ...quote,
+    volume_normalized_quote: normalizedVolume(quote.volume_raw_quote, profile),
+    volume_normalized_unit: profile.normalized_unit,
+    volume_profile_status: profile.semantics_status
+  };
 }
 
 function beijingNowParts(date = new Date()) {
@@ -727,7 +843,7 @@ async function fetchQuoteForDiagnostics(symbol: string) {
       quote_time: f[30] || null,
       high: num(f[33]),
       low: num(f[34]),
-      volume_lot: num(f[36]),
+      volume_raw_quote: num(f[36]),
       turnover_wan: num(f[37])
     };
   } catch (e) {
@@ -751,7 +867,8 @@ function commonMetadata(now = new Date()) {
     completion_grace_ms: BAR_CLOSE_GRACE_MS,
     bar_close_grace_ms: BAR_CLOSE_GRACE_MS,
     cross_sync_grace_ms: CROSS_SYNC_GRACE_MS,
-    safety_status: "TEST_ONLY",
+    safety_status: "RELEASE_CANDIDATE_TEST_ONLY",
+    release_status: "V1_0_CANDIDATE_PENDING_ACCEPTANCE",
     formal_v3_trigger: "NOT_APPROVED",
     formal_trigger_allowed: false
   };
@@ -789,7 +906,8 @@ function requestWindowPlan(interval: Interval, requestedLimit: number) {
   };
 }
 
-function computeVolumeValidation(oneBars: RawMinuteBar[], quote: any, now = new Date()) {
+function computeVolumeValidation(symbol: string, oneBars: RawMinuteBar[], quote: any, now = new Date()) {
+  const profile = volumeProfileForSymbol(symbol);
   const bj = beijingNowParts(now);
   const currentDay = oneBars
     .filter((b) => b.time.startsWith(`${bj.date} `) && b.bar_state !== "OUT_OF_SESSION")
@@ -806,12 +924,12 @@ function computeVolumeValidation(oneBars: RawMinuteBar[], quote: any, now = new 
   const latestPt = latest ? parseMinuteTime(latest) : null;
   const quoteSameDate = Boolean(quotePt && quotePt.date === bj.date);
   const coversQuoteMinute = Boolean(quotePt && latestPt && latestPt.date === quotePt.date && latestPt.totalMinutes >= quotePt.totalMinutes);
-  const quoteVolume = typeof quote?.volume_lot === "number" ? quote.volume_lot : null;
-  const diff = sumRaw != null && quoteVolume != null ? Math.abs(sumRaw - quoteVolume) : null;
-  const rel = diff != null && quoteVolume != null ? diff / Math.max(1, Math.abs(quoteVolume)) : null;
+  const quoteVolumeRaw = typeof quote?.volume_raw_quote === "number" ? quote.volume_raw_quote : null;
+  const diff = sumRaw != null && quoteVolumeRaw != null ? Math.abs(sumRaw - quoteVolumeRaw) : null;
+  const rel = diff != null && quoteVolumeRaw != null ? diff / Math.max(1, Math.abs(quoteVolumeRaw)) : null;
 
   let status = "INSUFFICIENT_COVERAGE";
-  if (sumRaw == null || quoteVolume == null || !quoteSameDate || !startsAtAuctionSeed || !coversQuoteMinute) {
+  if (sumRaw == null || quoteVolumeRaw == null || !quoteSameDate || !startsAtAuctionSeed || !coversQuoteMinute) {
     status = "INSUFFICIENT_COVERAGE";
   } else if ((diff as number) <= 2 || (rel as number) <= 0.001) {
     status = "WITHIN_LIVE_TOLERANCE";
@@ -830,12 +948,62 @@ function computeVolumeValidation(oneBars: RawMinuteBar[], quote: any, now = new 
     quote_same_date: quoteSameDate,
     covers_quote_minute: coversQuoteMinute,
     sum_volume_raw_current_day: sumRaw,
-    quote_volume_lot: quoteVolume,
+    quote_volume_raw_current_day: quoteVolumeRaw,
     absolute_difference: diff,
     relative_difference: rel,
-    unit_conclusion: "UNVERIFIED_TENCENT_RAW",
+    raw_scale_consistency: status === "WITHIN_LIVE_TOLERANCE" ? "SUPPORTED" : status === "INSUFFICIENT_COVERAGE" ? "NOT_TESTED" : "MISMATCH_OR_TIMING_SKEW",
+    volume_profile: profile,
+    normalized_sum_current_day: normalizedVolume(sumRaw, profile),
+    normalized_quote_volume: normalizedVolume(quoteVolumeRaw, profile),
+    use_absolute_normalized_volume: profile.absolute_normalization_usable,
+    use_relative_volume_ratios: profile.relative_volume_usable,
     use_for_formal_gate: false,
-    note: "Diagnostic only. A live near-match supports same-scale consistency but does not prove the unit semantics; snapshot timing can create small differences."
+    note: "Raw same-symbol volume is suitable for relative-volume ratios when the data path is healthy. Absolute normalization is allowed only for empirically validated symbol families; this is not official Tencent field documentation."
+  };
+}
+
+function buildV3CandidateGate(args: {
+  symbol: string;
+  interval: Interval;
+  dataGrade: "A" | "B" | "C";
+  crossStatus: string;
+  trueGapCount: number;
+  completedBars: Array<{ time: string }>;
+  now: Date;
+}) {
+  const { symbol, interval, dataGrade, crossStatus, trueGapCount, completedBars, now } = args;
+  const reasons: string[] = [];
+  const cal = tradingCalendarInfo(beijingNowParts(now).date);
+  const latestVerified = completedBars.length ? completedBars[completedBars.length - 1].time : null;
+
+  if (interval !== 5) reasons.push("INTERVAL_NOT_EXACT_5M");
+  if (cal.is_trading_day !== true) reasons.push("CALENDAR_NOT_VERIFIED_TRADING_DAY");
+  if (symbol.startsWith("bj")) reasons.push("BSE_MINUTE_NOT_VALIDATED");
+  if (dataGrade !== "A") reasons.push(`DATA_GRADE_${dataGrade}`);
+  if (crossStatus !== "PASS") reasons.push(`CROSS_${crossStatus}`);
+  if (trueGapCount > 0) reasons.push("TRUE_BAR_GAP_PRESENT");
+  if (!latestVerified) reasons.push("NO_VERIFIED_COMPLETED_BAR");
+
+  const dataGatePass = reasons.length === 0;
+  return {
+    gate_name: "BSI_SWING_V3_EXACT_5M_DATA_GATE",
+    data_gate_pass: dataGatePass,
+    eligible_bar_time: dataGatePass ? latestVerified : null,
+    required_conditions: [
+      "interval=5m",
+      "trading calendar PASS",
+      "data_grade=A",
+      "completed-bar cross_path_check=PASS",
+      "true_bar_gap_count=0",
+      "non-BSE validated path",
+      "verified completed bar exists"
+    ],
+    reasons,
+    server_formal_release_enabled: false,
+    formal_trigger_allowed: false,
+    note: dataGatePass
+      ? "V1.0 candidate data gate passes for the latest verified completed 5m bar, but server-level formal release remains disabled until acceptance regression passes."
+      : "Fail-closed: the candidate does not satisfy the exact 5m data gate."
   };
 }
 
@@ -849,8 +1017,9 @@ function bseUnavailableStatus(symbol: string, quote: any, one: any, native?: any
 
 async function buildMinuteResponse(code: string, interval: Interval, limit: number) {
   const symbol = normalizeSymbol(code);
+  const volumeProfile = volumeProfileForSymbol(symbol);
   const windowPlan = requestWindowPlan(interval, limit);
-  const quote = await fetchQuoteForDiagnostics(symbol);
+  const quote = withQuoteVolumeNormalization(await fetchQuoteForDiagnostics(symbol), volumeProfile);
 
   if (interval === 1) {
     const raw = await fetchTencentMinuteRaw(symbol, 1, windowPlan.one_minute_count);
@@ -875,11 +1044,16 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
         integrity: { ok: false, issues: ["NO_DATA"] },
         fetch_meta: raw.fetch_meta,
         quote_diagnostics: quote,
+        volume_profile: volumeProfile,
         fetched_at_beijing: beijingNowParts(doneAt).iso,
         timestamp_semantics: "BAR_END_SUPPORTED_BY_2026-08-12_LIVE_TESTS; 09:30_IS_AUCTION_SEED_NOT_REGULAR_1M",
         field_semantics: {
           columns: ["time", "open", "close", "high", "low", "volume_raw", "raw_extra_1", "raw_extra_2"],
-          volume_unit: "UNVERIFIED_TENCENT_RAW",
+          volume_unit: volumeProfile.raw_unit,
+          volume_normalized_unit: volumeProfile.normalized_unit,
+          volume_semantics_status: volumeProfile.semantics_status,
+          relative_volume_usable: volumeProfile.relative_volume_usable,
+          absolute_normalization_usable: volumeProfile.absolute_normalization_usable,
           raw_extra_1: "UNVERIFIED_DO_NOT_TREAT_AS_AMOUNT",
           raw_extra_2: "UNVERIFIED_DO_NOT_TREAT_AS_AMOUNT"
         },
@@ -902,19 +1076,24 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
       request_window: windowPlan,
       preferred_path: "TENCENT_NATIVE_1M",
       returned_completed_bars: completed.length,
-      completed_bars: completed,
-      forming_bar: forming.length ? forming[forming.length - 1] : null,
-      auction_seed_bar: auctionSeeds.length ? auctionSeeds[auctionSeeds.length - 1] : null,
-      raw_tail: bars.slice(-6),
+      completed_bars: completed.map((b) => withNormalizedVolume(b, volumeProfile)),
+      forming_bar: forming.length ? withNormalizedVolume(forming[forming.length - 1], volumeProfile) : null,
+      auction_seed_bar: auctionSeeds.length ? withNormalizedVolume(auctionSeeds[auctionSeeds.length - 1], volumeProfile) : null,
+      raw_tail: bars.slice(-6).map((b) => withNormalizedVolume(b, volumeProfile)),
       integrity: integrityCheck(bars),
       fetch_meta: raw.fetch_meta,
       quote_diagnostics: quote,
-      volume_validation: computeVolumeValidation(bars, quote, doneAt),
+      volume_profile: volumeProfile,
+      volume_validation: computeVolumeValidation(symbol, bars, quote, doneAt),
       fetched_at_beijing: beijingNowParts(doneAt).iso,
       timestamp_semantics: "BAR_END_SUPPORTED_BY_2026-08-12_LIVE_TESTS; 09:30_IS_AUCTION_SEED_NOT_REGULAR_1M",
       field_semantics: {
         columns: ["time", "open", "close", "high", "low", "volume_raw", "raw_extra_1", "raw_extra_2"],
-        volume_unit: "UNVERIFIED_TENCENT_RAW",
+        volume_unit: volumeProfile.raw_unit,
+        volume_normalized_unit: volumeProfile.normalized_unit,
+        volume_semantics_status: volumeProfile.semantics_status,
+        relative_volume_usable: volumeProfile.relative_volume_usable,
+        absolute_normalization_usable: volumeProfile.absolute_normalization_usable,
         raw_extra_1: "UNVERIFIED_DO_NOT_TREAT_AS_AMOUNT",
         raw_extra_2: "UNVERIFIED_DO_NOT_TREAT_AS_AMOUNT"
       },
@@ -1006,20 +1185,30 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
     ? (aggSettling.length ? aggSettling[aggSettling.length - 1] : null)
     : null;
 
+  const v3CandidateGate = buildV3CandidateGate({
+    symbol,
+    interval,
+    dataGrade,
+    crossStatus: cross.status,
+    trueGapCount: aggregation.true_bar_gaps.length,
+    completedBars: topCompleted,
+    now: doneAt
+  });
+
   return {
     ...commonMetadata(doneAt),
     symbol,
     interval: `${interval}m`,
     data_status: dataStatus,
     data_grade: dataGrade,
-    exact_5m_candidate_rule: interval === 5 ? "ONLY_GRADE_A_MAY_BECOME_FORMAL_AFTER_SEPARATE_V3_APPROVAL" : "NOT_APPLICABLE_OR_AUXILIARY",
+    exact_5m_candidate_rule: interval === 5 ? "V1_0_DATA_GATE_REQUIRES_GRADE_A_CROSS_PASS_NO_TRUE_GAP; SERVER_FORMAL_RELEASE_STAYS_DISABLED_UNTIL_ACCEPTANCE" : "NOT_APPLICABLE_OR_AUXILIARY",
     request_policy: "SEQUENTIAL_TENCENT_1M_PRIMARY_THEN_NATIVE_VERIFY_COMPLETED_ONLY",
     request_window: windowPlan,
     preferred_path: preferredPath,
     returned_completed_bars: topCompleted.length,
-    completed_bars: topCompleted,
-    forming_bar: topForming,
-    settling_bar: topSettling,
+    completed_bars: topCompleted.map((b) => withNormalizedVolume(b, volumeProfile)),
+    forming_bar: topForming ? withNormalizedVolume(topForming as any, volumeProfile) : null,
+    settling_bar: topSettling ? withNormalizedVolume(topSettling, volumeProfile) : null,
     latest_bar_verification: topSettling ? "SYNC_SETTLING" : topForming ? "FORMING" : dataGrade === "A" ? "VERIFIED" : "UNAVAILABLE",
     formal_candidate_status: interval === 5
       ? (topSettling
@@ -1027,9 +1216,10 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
           : topForming
             ? "WAIT_BAR_CLOSE"
             : dataGrade === "A"
-              ? "GRADE_A_CANDIDATE_ONLY_SEPARATE_V3_APPROVAL_REQUIRED"
+              ? "V1_0_DATA_GATE_PASS_SERVER_FORMAL_RELEASE_DISABLED"
               : "NOT_ELIGIBLE")
       : "NOT_APPLICABLE_OR_AUXILIARY",
+    v3_candidate_gate: v3CandidateGate,
     aggregation_diagnostics: {
       forming_partials: aggregation.forming_partials,
       full_rows_settling: aggregation.full_rows_settling,
@@ -1041,9 +1231,9 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
     },
     aggregated_from_1m_path: {
       status: aggUsable ? "OK" : one.ok ? "NO_COMPLETE_AGGREGATED_BARS" : "DOWN",
-      completed_bars: aggCompleted,
-      forming_bar: aggForming.length ? aggForming[aggForming.length - 1] : null,
-      settling_bar: aggSettling.length ? aggSettling[aggSettling.length - 1] : null,
+      completed_bars: aggCompleted.map((b) => withNormalizedVolume(b, volumeProfile)),
+      forming_bar: aggForming.length ? withNormalizedVolume(aggForming[aggForming.length - 1], volumeProfile) : null,
+      settling_bar: aggSettling.length ? withNormalizedVolume(aggSettling[aggSettling.length - 1], volumeProfile) : null,
       forming_partials: aggregation.forming_partials,
       full_rows_settling: aggregation.full_rows_settling,
       closed_settling: aggregation.closed_settling,
@@ -1057,22 +1247,27 @@ async function buildMinuteResponse(code: string, interval: Interval, limit: numb
     },
     native_path: {
       status: nativeUsable ? "OK" : native.ok ? "NO_COMPLETE_NATIVE_BARS" : "DOWN",
-      completed_bars: nativeCompleted,
-      forming_bar: nativeForming.length ? nativeForming[nativeForming.length - 1] : null,
-      settling_bar: nativeSettling.length ? nativeSettling[nativeSettling.length - 1] : null,
-      raw_tail: nativeBars.slice(-6),
+      completed_bars: nativeCompleted.map((b) => withNormalizedVolume(b, volumeProfile)),
+      forming_bar: nativeForming.length ? withNormalizedVolume(nativeForming[nativeForming.length - 1], volumeProfile) : null,
+      settling_bar: nativeSettling.length ? withNormalizedVolume(nativeSettling[nativeSettling.length - 1], volumeProfile) : null,
+      raw_tail: nativeBars.slice(-6).map((b) => withNormalizedVolume(b, volumeProfile)),
       integrity: native.ok ? integrityCheck(nativeBars) : { ok: false, issues: ["NO_NATIVE_DATA"] },
       fetch_meta: native.fetch_meta,
       error: native.ok ? null : native.error
     },
     cross_path_check: cross,
     quote_diagnostics: quote,
-    volume_validation: computeVolumeValidation(oneBars, quote, doneAt),
+    volume_profile: volumeProfile,
+    volume_validation: computeVolumeValidation(symbol, oneBars, quote, doneAt),
     fetched_at_beijing: beijingNowParts(doneAt).iso,
     timestamp_semantics: "BAR_END_SUPPORTED_BY_2026-08-12_LIVE_TESTS; 5S_BAR_CLOSE_GRACE; 30S_CROSS_SYNC_SETTLING; CROSS_CHECK_VERIFICATION_ELIGIBLE_BARS_ONLY",
     field_semantics: {
       native_columns: ["time", "open", "close", "high", "low", "volume_raw", "raw_extra_1", "raw_extra_2"],
-      volume_unit: "UNVERIFIED_TENCENT_RAW",
+      volume_unit: volumeProfile.raw_unit,
+      volume_normalized_unit: volumeProfile.normalized_unit,
+      volume_semantics_status: volumeProfile.semantics_status,
+      relative_volume_usable: volumeProfile.relative_volume_usable,
+      absolute_normalization_usable: volumeProfile.absolute_normalization_usable,
       raw_extra_1: "UNVERIFIED_DO_NOT_TREAT_AS_AMOUNT",
       raw_extra_2: "UNVERIFIED_DO_NOT_TREAT_AS_AMOUNT",
       amount_yuan: "NOT_PROVIDED_IN_TEST_VERSION"
@@ -1317,11 +1512,62 @@ function runLogicSelfTest() {
     syntheticRaw("2026-08-12 09:30", 10, 10, 10, 10, 100, volumeNow),
     syntheticRaw("2026-08-12 09:31", 10, 10.1, 9.9, 10.05, 200, volumeNow)
   ];
-  const volumeCheck = computeVolumeValidation(volumeRows, { quote_time: "20260812093130", volume_lot: 300 }, volumeNow);
+  const volumeCheck = computeVolumeValidation("sz300059", volumeRows, { quote_time: "20260812093130", volume_raw_quote: 300 }, volumeNow);
   cases.push({
-    name: "VOLUME_DIAGNOSTIC_NEAR_MATCH_DOES_NOT_PROMOTE_UNIT",
-    pass: volumeCheck.status === "WITHIN_LIVE_TOLERANCE" && volumeCheck.unit_conclusion === "UNVERIFIED_TENCENT_RAW" && volumeCheck.use_for_formal_gate === false,
+    name: "VOLUME_RAW_SCALE_DIAGNOSTIC_MATCHES_QUOTE_WITHOUT_BEING_FORMAL_GATE",
+    pass: volumeCheck.status === "WITHIN_LIVE_TOLERANCE" && volumeCheck.raw_scale_consistency === "SUPPORTED" && volumeCheck.use_for_formal_gate === false,
     observed: volumeCheck
+  });
+
+  const starProfile = volumeProfileForSymbol("sh688981");
+  cases.push({
+    name: "STAR_VOLUME_PROFILE_IS_SHARE_X1",
+    pass: starProfile.raw_unit === "SHARE" && starProfile.multiplier_to_base_units === 1 && normalizedVolume(2398805, starProfile) === 2398805,
+    observed: starProfile
+  });
+
+  const mainProfile = volumeProfileForSymbol("sh601066");
+  cases.push({
+    name: "MAIN_BOARD_VOLUME_PROFILE_IS_LOT_X100",
+    pass: mainProfile.raw_unit === "LOT_100_SHARES" && mainProfile.multiplier_to_base_units === 100 && normalizedVolume(9978, mainProfile) === 997800,
+    observed: mainProfile
+  });
+
+  const gemProfile = volumeProfileForSymbol("sz300059");
+  cases.push({
+    name: "CHINEXT_VOLUME_PROFILE_IS_LOT_X100",
+    pass: gemProfile.raw_unit === "LOT_100_SHARES" && normalizedVolume(71613, gemProfile) === 7161300,
+    observed: gemProfile
+  });
+
+  const etfProfile = volumeProfileForSymbol("sh510300");
+  cases.push({
+    name: "ETF_VOLUME_PROFILE_IS_LOT_100_UNITS",
+    pass: etfProfile.raw_unit === "LOT_100_UNITS" && etfProfile.normalized_unit === "FUND_UNIT" && normalizedVolume(188264, etfProfile) === 18826400,
+    observed: etfProfile
+  });
+
+  const indexProfile = volumeProfileForSymbol("sh000300");
+  cases.push({
+    name: "INDEX_ABSOLUTE_VOLUME_FAILS_CLOSED_BUT_RELATIVE_VOLUME_REMAINS_USABLE",
+    pass: indexProfile.absolute_normalization_usable === false && indexProfile.relative_volume_usable === true && normalizedVolume(1000, indexProfile) == null,
+    observed: indexProfile
+  });
+
+  const gateProfileNow = bjDate("2026-08-12 10:20:31");
+  const gate = buildV3CandidateGate({
+    symbol: "sz300059",
+    interval: 5,
+    dataGrade: "A",
+    crossStatus: "PASS",
+    trueGapCount: 0,
+    completedBars: [{ time: "2026-08-12 10:20" }],
+    now: gateProfileNow
+  });
+  cases.push({
+    name: "V1_DATA_GATE_CAN_PASS_WHILE_SERVER_FORMAL_RELEASE_STAYS_DISABLED",
+    pass: gate.data_gate_pass === true && gate.eligible_bar_time === "2026-08-12 10:20" && gate.formal_trigger_allowed === false && gate.server_formal_release_enabled === false,
+    observed: gate
   });
 
   const cappedWindow = requestWindowPlan(15, 60);
@@ -1355,7 +1601,8 @@ function runLogicSelfTest() {
     mode: "OFFLINE_LOGIC_SELFTEST_NO_LIVE_MARKET_REQUIRED",
     cases,
     summary: { total: cases.length, passed: cases.length - failed.length, failed: failed.length },
-    safety_status: "TEST_ONLY",
+    safety_status: "RELEASE_CANDIDATE_TEST_ONLY",
+    release_status: "V1_0_CANDIDATE_PENDING_ACCEPTANCE",
     formal_v3_trigger: "NOT_APPROVED"
   };
 }
@@ -1366,7 +1613,8 @@ async function buildHealthResponse() {
   const one = await fetchTencentMinuteRaw(symbol, 1, 280);
   if (one.ok) await sleep(220);
   const native5 = await fetchTencentMinuteRaw(symbol, 5, 50);
-  const quote = await fetchQuoteForDiagnostics(symbol);
+  const volumeProfile = volumeProfileForSymbol(symbol);
+  const quote = withQuoteVolumeNormalization(await fetchQuoteForDiagnostics(symbol), volumeProfile);
   const ended = new Date();
 
   const oneBars = one.ok ? parseMinuteRows(one.rows, one.fetched_at) : [];
@@ -1392,6 +1640,15 @@ async function buildHealthResponse() {
   const m5Settling = agg.bars.filter((b) => b.bucket_state === "CLOSED_SETTLING");
   const m1Ok = one.ok && integrityCheck(oneBars).ok;
   const m5A = one.ok && native5.ok && cross.status === "PASS" && agg.true_bar_gaps.length === 0 && m5Completed.length > 0;
+  const healthV3Gate = buildV3CandidateGate({
+    symbol,
+    interval: 5,
+    dataGrade: m5A ? "A" : "C",
+    crossStatus: cross.status,
+    trueGapCount: agg.true_bar_gaps.length,
+    completedBars: m5Completed,
+    now: ended
+  });
 
   return {
     ...commonMetadata(ended),
@@ -1401,9 +1658,11 @@ async function buildHealthResponse() {
     readiness: {
       quote: quote.ok ? "READY_FOR_TEST" : "DOWN",
       minute_1m: m1Ok ? "READY_FOR_TEST" : "DOWN",
-      minute_5m: m5A ? (m5Settling.length ? "GRADE_A_BASE_READY_LATEST_BAR_SYNC_SETTLING" : "GRADE_A_TEST_READY") : "NOT_GRADE_A",
-      formal_v3_trigger: "NOT_APPROVED"
+      minute_5m: m5A ? (m5Settling.length ? "GRADE_A_BASE_READY_LATEST_BAR_SYNC_SETTLING" : "GRADE_A_V1_CANDIDATE_READY") : "NOT_GRADE_A",
+      formal_v3_trigger: "NOT_APPROVED",
+      release_status: "V1_0_CANDIDATE_PENDING_ACCEPTANCE"
     },
+    v3_candidate_gate: healthV3Gate,
     state: {
       session_state: sessionStateAt(ended),
       latest_completed_1m: m1Completed.length ? m1Completed[m1Completed.length - 1].time : null,
@@ -1424,7 +1683,8 @@ async function buildHealthResponse() {
     },
     checks: {
       quote,
-      volume_validation: computeVolumeValidation(oneBars, quote, ended),
+      volume_profile: volumeProfile,
+      volume_validation: computeVolumeValidation(symbol, oneBars, quote, ended),
       minute_1m: {
         ok: m1Ok,
         integrity: one.ok ? integrityCheck(oneBars) : { ok: false, issues: ["NO_1M_DATA"] },
@@ -1450,7 +1710,7 @@ async function buildHealthResponse() {
 
 function createServer() {
   const server = new McpServer({
-    name: "Tencent Minute Kline Test",
+    name: "Tencent Minute Kline V1 Candidate",
     version: MCP_VERSION
   });
 
@@ -1458,7 +1718,7 @@ function createServer() {
     "get_tencent_minute_kline",
     {
       description:
-        "腾讯分钟K RC3测试。正式候选只支持1/5/15分钟；为兼容旧ChatGPT工具快照仍接受30/60输入，但会结构化返回UNSUPPORTED_INTERVAL，不会静默生成不完整数据。5/15分钟用腾讯1分钟本地聚合，并只对双方已完成K与腾讯原生周期交叉验证。含09:30集合竞价seed、午休/下午session、窗口边缘/真缺口分类和fail-closed。仅测试，禁止直接作为BSI-SWING_V3正式触发。",
+        "腾讯分钟K V1.0 Candidate。正式验证周期为1/5/15分钟；30/60仅为旧工具快照兼容输入并结构化拒绝。5/15分钟采用腾讯1分钟聚合 + 腾讯原生周期的已完成K交叉验证；包含09:30集合竞价seed、午休/下午session、30秒路径同步settling、真缺口fail-closed、按证券家族的成交量归一化和BSI-SWING_V3 EXACT_5M候选数据门。当前仍为发布候选，formal_trigger_allowed=false，验收通过后再升正式。",
       inputSchema: {
         code: z.string().describe("证券代码。普通股票可写300059；指数/易歧义代码请显式写交易所前缀，例如sh000300；ETF建议写sh510300/sz159919"),
         interval: z.union([z.literal(1), z.literal(5), z.literal(15), z.literal(30), z.literal(60)]).default(5),
@@ -1477,11 +1737,12 @@ function createServer() {
                 data_grade: "C",
                 requested_interval: `${interval}m`,
                 supported_intervals: ["1m", "5m", "15m"],
-                compatibility_note: "30m/60m inputs are accepted only to remain compatible with older ChatGPT tool snapshots; RC3 does not treat them as validated formal candidates because the Tencent 1m request window is capped.",
-                safety_status: "TEST_ONLY",
+                compatibility_note: "30m/60m inputs are accepted only to remain compatible with older ChatGPT tool snapshots; V1.0 Candidate does not treat them as validated formal candidates because the Tencent 1m request window is capped.",
+                safety_status: "RELEASE_CANDIDATE_TEST_ONLY",
+                release_status: "V1_0_CANDIDATE_PENDING_ACCEPTANCE",
                 formal_v3_trigger: "NOT_APPROVED",
                 formal_trigger_allowed: false,
-                error: "30m/60m are intentionally disabled in RC3"
+                error: "30m/60m are intentionally disabled in V1.0 Candidate"
               }, null, 2)
             }]
           };
@@ -1496,7 +1757,8 @@ function createServer() {
               version: VERSION,
               data_status: "DOWN",
               data_grade: "C",
-              safety_status: "TEST_ONLY",
+              safety_status: "RELEASE_CANDIDATE_TEST_ONLY",
+              release_status: "V1_0_CANDIDATE_PENDING_ACCEPTANCE",
               formal_v3_trigger: "NOT_APPROVED",
               formal_trigger_allowed: false,
               error: String(e)
@@ -1511,7 +1773,7 @@ function createServer() {
     "tencent_minute_health",
     {
       description:
-        "腾讯分钟K RC3健康检查。复用一次quote、一次1m和一次原生5m请求，输出session、latest completed、forming、真缺口、窗口边缘和仅completed跨路径校验。",
+        "腾讯分钟K V1.0 Candidate健康检查。复用一次quote、一次1m和一次原生5m请求，输出session、latest completed、forming/settling、真缺口、成交量profile、候选V3数据门和仅completed跨路径校验。",
       inputSchema: {}
     },
     async () => {
@@ -1524,7 +1786,7 @@ function createServer() {
     "tencent_minute_logic_selftest",
     {
       description:
-        "离线逻辑自测，不依赖交易日或实时行情。验证09:30集合竞价seed、5秒bar-close、30秒cross-sync settling、forming/window-edge/真缺口、午休、下午重开，以及settling阶段不误报PATH_CONFLICT。",
+        "V1.0 Candidate离线逻辑自测，不依赖交易日或实时行情。验证09:30集合竞价seed、5秒bar-close、30秒cross-sync settling、forming/window-edge/真缺口、午休、下午重开、成交量家族归一化和V3候选数据门。",
       inputSchema: {}
     },
     async () => {

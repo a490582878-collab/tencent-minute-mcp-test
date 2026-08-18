@@ -1,0 +1,803 @@
+{
+  "version": "TENCENT_MINUTE_V1.0_CANDIDATE",
+  "ok": true,
+  "mode": "OFFLINE_LOGIC_SELFTEST_NO_LIVE_MARKET_REQUIRED",
+  "cases": [
+    {
+      "name": "AM_FIRST_5M_INCLUDES_0930_AUCTION_SEED",
+      "pass": true,
+      "observed": {
+        "time": "2026-08-12 09:35",
+        "open": 19.8,
+        "close": 19.78,
+        "high": 19.83,
+        "low": 19.77,
+        "volume_raw": 126418,
+        "source_rows": 6,
+        "expected_rows": 6,
+        "source_times": [
+          "2026-08-12 09:30",
+          "2026-08-12 09:31",
+          "2026-08-12 09:32",
+          "2026-08-12 09:33",
+          "2026-08-12 09:34",
+          "2026-08-12 09:35"
+        ],
+        "missing_source_times": [],
+        "bucket_state": "CLOSED_SETTLING",
+        "partial_kind": null,
+        "is_complete": false
+      }
+    },
+    {
+      "name": "ORDINARY_5M_COMPLETES_AFTER_CROSS_SYNC_GRACE",
+      "pass": true,
+      "observed": {
+        "time": "2026-08-12 09:40",
+        "open": 10,
+        "close": 14.2,
+        "high": 14.5,
+        "low": 9.5,
+        "volume_raw": 510,
+        "source_rows": 5,
+        "expected_rows": 5,
+        "source_times": [
+          "2026-08-12 09:36",
+          "2026-08-12 09:37",
+          "2026-08-12 09:38",
+          "2026-08-12 09:39",
+          "2026-08-12 09:40"
+        ],
+        "missing_source_times": [],
+        "bucket_state": "COMPLETED",
+        "partial_kind": null,
+        "is_complete": true
+      }
+    },
+    {
+      "name": "FORMING_PARTIAL_IS_NOT_TRUE_GAP",
+      "pass": true,
+      "observed": {
+        "bars": [
+          {
+            "time": "2026-08-12 09:45",
+            "open": 10,
+            "close": 10.2,
+            "high": 10.3,
+            "low": 9.9,
+            "volume_raw": 220,
+            "source_rows": 2,
+            "expected_rows": 5,
+            "source_times": [
+              "2026-08-12 09:41",
+              "2026-08-12 09:42"
+            ],
+            "missing_source_times": [
+              "2026-08-12 09:43",
+              "2026-08-12 09:44",
+              "2026-08-12 09:45"
+            ],
+            "bucket_state": "FORMING",
+            "partial_kind": "FORMING_PARTIAL",
+            "is_complete": false
+          }
+        ],
+        "forming_partials": [
+          "2026-08-12 09:45: 2/5"
+        ],
+        "full_rows_settling": [],
+        "closed_settling": [],
+        "closed_settling_partials": [],
+        "window_edge_partials": [],
+        "true_bar_gaps": []
+      }
+    },
+    {
+      "name": "WINDOW_EDGE_PARTIAL_IS_NOT_TRUE_GAP",
+      "pass": true,
+      "observed": {
+        "bars": [
+          {
+            "time": "2026-08-12 10:05",
+            "open": 10,
+            "close": 13.2,
+            "high": 13.5,
+            "low": 9.5,
+            "volume_raw": 406,
+            "source_rows": 4,
+            "expected_rows": 5,
+            "source_times": [
+              "2026-08-12 10:02",
+              "2026-08-12 10:03",
+              "2026-08-12 10:04",
+              "2026-08-12 10:05"
+            ],
+            "missing_source_times": [
+              "2026-08-12 10:01"
+            ],
+            "bucket_state": "WINDOW_EDGE_PARTIAL",
+            "partial_kind": "WINDOW_EDGE_PARTIAL",
+            "is_complete": false
+          }
+        ],
+        "forming_partials": [],
+        "full_rows_settling": [],
+        "closed_settling": [],
+        "closed_settling_partials": [],
+        "window_edge_partials": [
+          "2026-08-12 10:05: 4/5; missing=2026-08-12 10:01"
+        ],
+        "true_bar_gaps": []
+      }
+    },
+    {
+      "name": "INTERNAL_MISSING_MINUTE_IS_TRUE_GAP",
+      "pass": true,
+      "observed": {
+        "bars": [
+          {
+            "time": "2026-08-12 10:05",
+            "open": 10,
+            "close": 10.1,
+            "high": 10.2,
+            "low": 9.9,
+            "volume_raw": 500,
+            "source_rows": 5,
+            "expected_rows": 5,
+            "source_times": [
+              "2026-08-12 10:01",
+              "2026-08-12 10:02",
+              "2026-08-12 10:03",
+              "2026-08-12 10:04",
+              "2026-08-12 10:05"
+            ],
+            "missing_source_times": [],
+            "bucket_state": "COMPLETED",
+            "partial_kind": null,
+            "is_complete": true
+          },
+          {
+            "time": "2026-08-12 10:10",
+            "open": 10,
+            "close": 10.1,
+            "high": 10.2,
+            "low": 9.9,
+            "volume_raw": 400,
+            "source_rows": 4,
+            "expected_rows": 5,
+            "source_times": [
+              "2026-08-12 10:06",
+              "2026-08-12 10:07",
+              "2026-08-12 10:09",
+              "2026-08-12 10:10"
+            ],
+            "missing_source_times": [
+              "2026-08-12 10:08"
+            ],
+            "bucket_state": "TRUE_BAR_GAP",
+            "partial_kind": "TRUE_BAR_GAP",
+            "is_complete": false
+          }
+        ],
+        "forming_partials": [],
+        "full_rows_settling": [],
+        "closed_settling": [],
+        "closed_settling_partials": [],
+        "window_edge_partials": [],
+        "true_bar_gaps": [
+          "2026-08-12 10:10: 4/5; missing=2026-08-12 10:08"
+        ]
+      }
+    },
+    {
+      "name": "LUNCH_LAST_5M_IS_1126_TO_1130",
+      "pass": true,
+      "observed": {
+        "time": "2026-08-12 11:30",
+        "open": 19.77,
+        "close": 19.77,
+        "high": 19.78,
+        "low": 19.76,
+        "volume_raw": 13260,
+        "source_rows": 5,
+        "expected_rows": 5,
+        "source_times": [
+          "2026-08-12 11:26",
+          "2026-08-12 11:27",
+          "2026-08-12 11:28",
+          "2026-08-12 11:29",
+          "2026-08-12 11:30"
+        ],
+        "missing_source_times": [],
+        "bucket_state": "COMPLETED",
+        "partial_kind": null,
+        "is_complete": true
+      }
+    },
+    {
+      "name": "PM_FIRST_5M_IS_1301_TO_1305_ONLY",
+      "pass": true,
+      "observed": {
+        "time": "2026-08-12 13:05",
+        "open": 19.77,
+        "close": 19.75,
+        "high": 19.77,
+        "low": 19.75,
+        "volume_raw": 33088,
+        "source_rows": 5,
+        "expected_rows": 5,
+        "source_times": [
+          "2026-08-12 13:01",
+          "2026-08-12 13:02",
+          "2026-08-12 13:03",
+          "2026-08-12 13:04",
+          "2026-08-12 13:05"
+        ],
+        "missing_source_times": [],
+        "bucket_state": "CLOSED_SETTLING",
+        "partial_kind": null,
+        "is_complete": false
+      }
+    },
+    {
+      "name": "CROSS_CHECK_IGNORES_FORMING_BARS",
+      "pass": true,
+      "observed": {
+        "comparison_scope": "VERIFICATION_ELIGIBLE_COMPLETED_BARS_ONLY",
+        "status": "PASS",
+        "compared_count": 1,
+        "exact_match_count": 1,
+        "mismatch_count": 0,
+        "full_window_exact_match": true,
+        "full_window_within_tolerance": true,
+        "settling_excluded_labels": [],
+        "settling_excluded_count": 0,
+        "bars": [
+          {
+            "time": "2026-08-12 13:05",
+            "within_tolerance": true,
+            "exact_match": true,
+            "price_ok": true,
+            "volume_ok": true,
+            "price_diffs": {
+              "open": 0,
+              "close": 0,
+              "high": 0,
+              "low": 0
+            },
+            "volume_diff": 0,
+            "native": {
+              "open": 19.77,
+              "high": 19.77,
+              "low": 19.75,
+              "close": 19.75,
+              "volume_raw": 33088
+            },
+            "aggregated": {
+              "open": 19.77,
+              "high": 19.77,
+              "low": 19.75,
+              "close": 19.75,
+              "volume_raw": 33088,
+              "source_rows": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "FULL_ROWS_BEFORE_5S_IS_SETTLING_NOT_GAP",
+      "pass": true,
+      "observed": {
+        "time": "2026-08-12 10:20",
+        "open": 19.4,
+        "close": 19.4,
+        "high": 19.5,
+        "low": 19.3,
+        "volume_raw": 23045,
+        "source_rows": 5,
+        "expected_rows": 5,
+        "source_times": [
+          "2026-08-12 10:16",
+          "2026-08-12 10:17",
+          "2026-08-12 10:18",
+          "2026-08-12 10:19",
+          "2026-08-12 10:20"
+        ],
+        "missing_source_times": [],
+        "bucket_state": "FORMING",
+        "partial_kind": "FULL_ROWS_SETTLING",
+        "is_complete": false
+      }
+    },
+    {
+      "name": "BAR_AFTER_5S_BEFORE_30S_IS_CLOSED_SETTLING",
+      "pass": true,
+      "observed": {
+        "time": "2026-08-12 10:20",
+        "open": 19.4,
+        "close": 19.4,
+        "high": 19.5,
+        "low": 19.3,
+        "volume_raw": 23045,
+        "source_rows": 5,
+        "expected_rows": 5,
+        "source_times": [
+          "2026-08-12 10:16",
+          "2026-08-12 10:17",
+          "2026-08-12 10:18",
+          "2026-08-12 10:19",
+          "2026-08-12 10:20"
+        ],
+        "missing_source_times": [],
+        "bucket_state": "CLOSED_SETTLING",
+        "partial_kind": "CLOSED_SETTLING_PARTIAL",
+        "is_complete": false
+      }
+    },
+    {
+      "name": "CROSS_IGNORES_CLOSED_SETTLING_MISMATCH",
+      "pass": true,
+      "observed": {
+        "comparison_scope": "VERIFICATION_ELIGIBLE_COMPLETED_BARS_ONLY",
+        "status": "PASS",
+        "compared_count": 1,
+        "exact_match_count": 1,
+        "mismatch_count": 0,
+        "full_window_exact_match": true,
+        "full_window_within_tolerance": true,
+        "settling_excluded_labels": [
+          "2026-08-12 10:20"
+        ],
+        "settling_excluded_count": 1,
+        "bars": [
+          {
+            "time": "2026-08-12 10:15",
+            "within_tolerance": true,
+            "exact_match": true,
+            "price_ok": true,
+            "volume_ok": true,
+            "price_diffs": {
+              "open": 0,
+              "close": 0,
+              "high": 0,
+              "low": 0
+            },
+            "volume_diff": 0,
+            "native": {
+              "open": 19.4,
+              "high": 19.5,
+              "low": 19.3,
+              "close": 19.4,
+              "volume_raw": 500
+            },
+            "aggregated": {
+              "open": 19.4,
+              "high": 19.5,
+              "low": 19.3,
+              "close": 19.4,
+              "volume_raw": 500,
+              "source_rows": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PERSISTENT_MISMATCH_AFTER_30S_FAILS_CLOSED",
+      "pass": true,
+      "observed": {
+        "comparison_scope": "VERIFICATION_ELIGIBLE_COMPLETED_BARS_ONLY",
+        "status": "CONFLICT",
+        "compared_count": 2,
+        "exact_match_count": 1,
+        "mismatch_count": 1,
+        "full_window_exact_match": false,
+        "full_window_within_tolerance": false,
+        "settling_excluded_labels": [],
+        "settling_excluded_count": 0,
+        "bars": [
+          {
+            "time": "2026-08-12 10:15",
+            "within_tolerance": true,
+            "exact_match": true,
+            "price_ok": true,
+            "volume_ok": true,
+            "price_diffs": {
+              "open": 0,
+              "close": 0,
+              "high": 0,
+              "low": 0
+            },
+            "volume_diff": 0,
+            "native": {
+              "open": 19.4,
+              "high": 19.5,
+              "low": 19.3,
+              "close": 19.4,
+              "volume_raw": 500
+            },
+            "aggregated": {
+              "open": 19.4,
+              "high": 19.5,
+              "low": 19.3,
+              "close": 19.4,
+              "volume_raw": 500,
+              "source_rows": 5
+            }
+          },
+          {
+            "time": "2026-08-12 10:20",
+            "within_tolerance": false,
+            "exact_match": false,
+            "price_ok": true,
+            "volume_ok": false,
+            "price_diffs": {
+              "open": 0,
+              "close": 0,
+              "high": 0,
+              "low": 0
+            },
+            "volume_diff": 500,
+            "native": {
+              "open": 19.4,
+              "high": 19.5,
+              "low": 19.3,
+              "close": 19.4,
+              "volume_raw": 22545
+            },
+            "aggregated": {
+              "open": 19.4,
+              "high": 19.5,
+              "low": 19.3,
+              "close": 19.4,
+              "volume_raw": 23045,
+              "source_rows": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "MATCH_AFTER_30S_BECOMES_VERIFIED",
+      "pass": true,
+      "observed": {
+        "comparison_scope": "VERIFICATION_ELIGIBLE_COMPLETED_BARS_ONLY",
+        "status": "PASS",
+        "compared_count": 2,
+        "exact_match_count": 2,
+        "mismatch_count": 0,
+        "full_window_exact_match": true,
+        "full_window_within_tolerance": true,
+        "settling_excluded_labels": [],
+        "settling_excluded_count": 0,
+        "bars": [
+          {
+            "time": "2026-08-12 10:15",
+            "within_tolerance": true,
+            "exact_match": true,
+            "price_ok": true,
+            "volume_ok": true,
+            "price_diffs": {
+              "open": 0,
+              "close": 0,
+              "high": 0,
+              "low": 0
+            },
+            "volume_diff": 0,
+            "native": {
+              "open": 19.4,
+              "high": 19.5,
+              "low": 19.3,
+              "close": 19.4,
+              "volume_raw": 500
+            },
+            "aggregated": {
+              "open": 19.4,
+              "high": 19.5,
+              "low": 19.3,
+              "close": 19.4,
+              "volume_raw": 500,
+              "source_rows": 5
+            }
+          },
+          {
+            "time": "2026-08-12 10:20",
+            "within_tolerance": true,
+            "exact_match": true,
+            "price_ok": true,
+            "volume_ok": true,
+            "price_diffs": {
+              "open": 0,
+              "close": 0,
+              "high": 0,
+              "low": 0
+            },
+            "volume_diff": 0,
+            "native": {
+              "open": 19.4,
+              "high": 19.5,
+              "low": 19.3,
+              "close": 19.4,
+              "volume_raw": 23045
+            },
+            "aggregated": {
+              "open": 19.4,
+              "high": 19.5,
+              "low": 19.3,
+              "close": 19.4,
+              "volume_raw": 23045,
+              "source_rows": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "TRADING_CALENDAR_REGULAR_WEEKDAY_PASS",
+      "pass": true,
+      "observed": {
+        "coverage": "2026_SSE_SZSE_OFFICIAL",
+        "status": "VERIFIED_2026",
+        "is_trading_day": true,
+        "reason": "REGULAR_TRADING_WEEKDAY",
+        "source": "SSE_SZSE_2026_OFFICIAL_CLOSURE_NOTICES"
+      }
+    },
+    {
+      "name": "TRADING_CALENDAR_OFFICIAL_HOLIDAY_FAIL_CLOSED",
+      "pass": true,
+      "observed": {
+        "coverage": "2026_SSE_SZSE_OFFICIAL",
+        "status": "VERIFIED_2026",
+        "is_trading_day": false,
+        "reason": "OFFICIAL_EXCHANGE_HOLIDAY",
+        "source": "SSE_SZSE_2026_OFFICIAL_CLOSURE_NOTICES"
+      }
+    },
+    {
+      "name": "TRADING_CALENDAR_WEEKEND_FAIL_CLOSED",
+      "pass": true,
+      "observed": {
+        "coverage": "2026_SSE_SZSE_OFFICIAL",
+        "status": "VERIFIED_2026",
+        "is_trading_day": false,
+        "reason": "WEEKEND",
+        "source": "SSE_SZSE_2026_OFFICIAL_CLOSURE_NOTICES"
+      }
+    },
+    {
+      "name": "TRADING_CALENDAR_OUTSIDE_COVERAGE_UNVERIFIED",
+      "pass": true,
+      "observed": {
+        "coverage": "2026_SSE_SZSE_OFFICIAL",
+        "status": "OUTSIDE_EMBEDDED_COVERAGE",
+        "is_trading_day": null,
+        "reason": "CALENDAR_UNVERIFIED_OUTSIDE_2026",
+        "source": "SSE_SZSE_2026_OFFICIAL_CLOSURE_NOTICES"
+      }
+    },
+    {
+      "name": "SESSION_STATE_HOLIDAY_IS_NON_TRADING_DAY",
+      "pass": true,
+      "observed": "NON_TRADING_DAY"
+    },
+    {
+      "name": "SESSION_STATE_OUTSIDE_CALENDAR_IS_UNVERIFIED",
+      "pass": true,
+      "observed": "CALENDAR_UNVERIFIED"
+    },
+    {
+      "name": "VOLUME_RAW_SCALE_DIAGNOSTIC_MATCHES_QUOTE_WITHOUT_BEING_FORMAL_GATE",
+      "pass": true,
+      "observed": {
+        "status": "WITHIN_LIVE_TOLERANCE",
+        "current_date": "2026-08-12",
+        "current_day_rows": 2,
+        "earliest_current_day_bar": "2026-08-12 09:30",
+        "latest_current_day_bar": "2026-08-12 09:31",
+        "starts_at_0930_auction_seed": true,
+        "quote_time": "20260812093130",
+        "quote_same_date": true,
+        "covers_quote_minute": true,
+        "sum_volume_raw_current_day": 300,
+        "quote_volume_raw_current_day": 300,
+        "absolute_difference": 0,
+        "relative_difference": 0,
+        "raw_scale_consistency": "SUPPORTED",
+        "volume_profile": {
+          "asset_class": "A_SHARE_STOCK",
+          "raw_unit": "LOT_100_SHARES",
+          "multiplier_to_base_units": 100,
+          "normalized_unit": "SHARE",
+          "semantics_status": "EMPIRICALLY_VALIDATED_FAMILY_RULE_V1",
+          "relative_volume_usable": true,
+          "absolute_normalization_usable": true,
+          "evidence_note": "Empirical family rule supported by live samples including sh601066, sz300059 and sz300308. Raw volume is normalized with x100 shares. This is empirical, not official Tencent field documentation."
+        },
+        "normalized_sum_current_day": 30000,
+        "normalized_quote_volume": 30000,
+        "use_absolute_normalized_volume": true,
+        "use_relative_volume_ratios": true,
+        "use_for_formal_gate": false,
+        "note": "Raw same-symbol volume is suitable for relative-volume ratios when the data path is healthy. Absolute normalization is allowed only for empirically validated symbol families; this is not official Tencent field documentation."
+      }
+    },
+    {
+      "name": "STAR_VOLUME_PROFILE_IS_SHARE_X1",
+      "pass": true,
+      "observed": {
+        "asset_class": "STAR_STOCK",
+        "raw_unit": "SHARE",
+        "multiplier_to_base_units": 1,
+        "normalized_unit": "SHARE",
+        "semantics_status": "EMPIRICALLY_VALIDATED_FAMILY_RULE_V1",
+        "relative_volume_usable": true,
+        "absolute_normalization_usable": true,
+        "evidence_note": "Empirically validated on STAR samples sh688981 and sh688256 by Tencent minute/raw-volume versus independent turnover-amount price reconstruction. This is empirical, not official Tencent field documentation."
+      }
+    },
+    {
+      "name": "MAIN_BOARD_VOLUME_PROFILE_IS_LOT_X100",
+      "pass": true,
+      "observed": {
+        "asset_class": "A_SHARE_STOCK",
+        "raw_unit": "LOT_100_SHARES",
+        "multiplier_to_base_units": 100,
+        "normalized_unit": "SHARE",
+        "semantics_status": "EMPIRICALLY_VALIDATED_FAMILY_RULE_V1",
+        "relative_volume_usable": true,
+        "absolute_normalization_usable": true,
+        "evidence_note": "Empirical family rule supported by live samples including sh601066, sz300059 and sz300308. Raw volume is normalized with x100 shares. This is empirical, not official Tencent field documentation."
+      }
+    },
+    {
+      "name": "CHINEXT_VOLUME_PROFILE_IS_LOT_X100",
+      "pass": true,
+      "observed": {
+        "asset_class": "A_SHARE_STOCK",
+        "raw_unit": "LOT_100_SHARES",
+        "multiplier_to_base_units": 100,
+        "normalized_unit": "SHARE",
+        "semantics_status": "EMPIRICALLY_VALIDATED_FAMILY_RULE_V1",
+        "relative_volume_usable": true,
+        "absolute_normalization_usable": true,
+        "evidence_note": "Empirical family rule supported by live samples including sh601066, sz300059 and sz300308. Raw volume is normalized with x100 shares. This is empirical, not official Tencent field documentation."
+      }
+    },
+    {
+      "name": "ETF_VOLUME_PROFILE_IS_LOT_100_UNITS",
+      "pass": true,
+      "observed": {
+        "asset_class": "ETF_FUND",
+        "raw_unit": "LOT_100_UNITS",
+        "multiplier_to_base_units": 100,
+        "normalized_unit": "FUND_UNIT",
+        "semantics_status": "EMPIRICALLY_VALIDATED_FAMILY_RULE_V1",
+        "relative_volume_usable": true,
+        "absolute_normalization_usable": true,
+        "evidence_note": "Empirically validated on ETF samples sh510300 and sz159919. Raw volume is normalized with x100 fund units for absolute-volume use."
+      }
+    },
+    {
+      "name": "INDEX_ABSOLUTE_VOLUME_FAILS_CLOSED_BUT_RELATIVE_VOLUME_REMAINS_USABLE",
+      "pass": true,
+      "observed": {
+        "asset_class": "INDEX",
+        "raw_unit": "UNVERIFIED_TENCENT_RAW",
+        "multiplier_to_base_units": null,
+        "normalized_unit": null,
+        "semantics_status": "UNVERIFIED_FAIL_CLOSED",
+        "relative_volume_usable": true,
+        "absolute_normalization_usable": false,
+        "evidence_note": "Index minute bars are usable for same-symbol relative-volume comparisons, but V1.0 does not assert a universal absolute unit for index volume."
+      }
+    },
+    {
+      "name": "V1_DATA_GATE_CAN_PASS_WHILE_SERVER_FORMAL_RELEASE_STAYS_DISABLED",
+      "pass": true,
+      "observed": {
+        "gate_name": "BSI_SWING_V3_EXACT_5M_DATA_GATE",
+        "data_gate_pass": true,
+        "eligible_bar_time": "2026-08-12 10:20",
+        "required_conditions": [
+          "interval=5m",
+          "trading calendar PASS",
+          "data_grade=A",
+          "completed-bar cross_path_check=PASS",
+          "true_bar_gap_count=0",
+          "non-BSE validated path",
+          "verified completed bar exists"
+        ],
+        "reasons": [],
+        "server_formal_release_enabled": false,
+        "formal_trigger_allowed": false,
+        "note": "V1.0 candidate data gate passes for the latest verified completed 5m bar, but server-level formal release remains disabled until acceptance regression passes."
+      }
+    },
+    {
+      "name": "FIFTEEN_MINUTE_OVERSIZED_LIMIT_IS_VISIBLY_CAPPED",
+      "pass": true,
+      "observed": {
+        "policy": "AUTO_RECENT_WINDOW_WITH_CAPACITY_DIAGNOSTICS",
+        "requested_limit": 60,
+        "effective_limit": 20,
+        "reliable_max_completed_bars": 20,
+        "requested_limit_supported": false,
+        "one_minute_count": 320,
+        "native_count": 30,
+        "note": "Requested 60 bars exceeds conservative 15m reliable window 20; output is capped visibly rather than silently under-covering"
+      }
+    },
+    {
+      "name": "WINDOW_EDGE_DOES_NOT_HIDE_INTERNAL_TRUE_GAP",
+      "pass": true,
+      "observed": {
+        "bars": [
+          {
+            "time": "2026-08-12 10:05",
+            "open": 10,
+            "close": 10.1,
+            "high": 10.2,
+            "low": 9.9,
+            "volume_raw": 300,
+            "source_rows": 3,
+            "expected_rows": 5,
+            "source_times": [
+              "2026-08-12 10:03",
+              "2026-08-12 10:04",
+              "2026-08-12 10:05"
+            ],
+            "missing_source_times": [
+              "2026-08-12 10:01",
+              "2026-08-12 10:02"
+            ],
+            "bucket_state": "WINDOW_EDGE_PARTIAL",
+            "partial_kind": "WINDOW_EDGE_PARTIAL",
+            "is_complete": false
+          },
+          {
+            "time": "2026-08-12 10:10",
+            "open": 10,
+            "close": 10.1,
+            "high": 10.2,
+            "low": 9.9,
+            "volume_raw": 400,
+            "source_rows": 4,
+            "expected_rows": 5,
+            "source_times": [
+              "2026-08-12 10:06",
+              "2026-08-12 10:07",
+              "2026-08-12 10:09",
+              "2026-08-12 10:10"
+            ],
+            "missing_source_times": [
+              "2026-08-12 10:08"
+            ],
+            "bucket_state": "TRUE_BAR_GAP",
+            "partial_kind": "TRUE_BAR_GAP",
+            "is_complete": false
+          }
+        ],
+        "forming_partials": [],
+        "full_rows_settling": [],
+        "closed_settling": [],
+        "closed_settling_partials": [],
+        "window_edge_partials": [
+          "2026-08-12 10:05: 3/5; missing=2026-08-12 10:01,2026-08-12 10:02"
+        ],
+        "true_bar_gaps": [
+          "2026-08-12 10:10: 4/5; missing=2026-08-12 10:08"
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "total": 28,
+    "passed": 28,
+    "failed": 0
+  },
+  "safety_status": "RELEASE_CANDIDATE_TEST_ONLY",
+  "release_status": "V1_0_CANDIDATE_PENDING_ACCEPTANCE",
+  "formal_v3_trigger": "NOT_APPROVED"
+}

@@ -1,0 +1,37 @@
+TENCENT_MINUTE_V1.0_CANDIDATE validation
+
+Build basis:
+- Based on deployed RC3 logic.
+- Worker name and tool names preserved for fastest replacement deployment.
+
+Static validation:
+- TypeScript source checked with local TypeScript compiler using module/runtime stubs for external MCP/Cloudflare packages.
+- Result: PASS (0 compiler errors in source-level check).
+
+Offline logic self-test:
+- Version: TENCENT_MINUTE_V1.0_CANDIDATE
+- Total cases: 28
+- Passed: 28
+- Failed: 0
+- Result: PASS
+
+New V1 checks include:
+- STAR sh688 volume profile = SHARE x1.
+- SSE/SZSE regular A-share family profile = LOT_100_SHARES x100.
+- ETF family profile = LOT_100_UNITS x100.
+- Index absolute volume normalization fail-closed; relative volume allowed.
+- Raw cumulative volume vs quote scale check remains diagnostic, not a formal trading gate.
+- V3 EXACT_5M candidate data gate can pass while server formal release remains disabled.
+
+Safety state:
+- RELEASE_CANDIDATE_TEST_ONLY
+- V1_0_CANDIDATE_PENDING_ACCEPTANCE
+- formal_v3_trigger=NOT_APPROVED
+- formal_trigger_allowed=false
+
+Not performed in this container:
+- Dependency-resolved Cloudflare Wrangler production build/deploy.
+- Live post-deployment boundary regression.
+
+Required next step after deployment:
+Run ACCEPTANCE_TESTS.md. Only after all PASS should a formal TENCENT_MINUTE_V1.0 package be promoted and integrated into BSI-SWING_V3.
